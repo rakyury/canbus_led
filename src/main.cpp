@@ -12,10 +12,9 @@ static constexpr int LED_COUNT = 60;                   // Number of LEDs on the 
 static constexpr int LED_BRIGHTNESS = 180;             // 0-255
 static constexpr uint32_t CAN_BITRATE = 1000000;       // 1 Mbps
 
-static constexpr char WIFI_SSID[] = "YOUR_WIFI_SSID";        // Replace with your Wi-Fi network
-static constexpr char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD"; // Replace with your Wi-Fi password
+static constexpr char WIFI_SSID[] = "CANLED_AP";             // SSID for the device access point
+static constexpr char WIFI_PASSWORD[] = "canled123";         // WPA2 password for the AP (min 8 chars)
 static constexpr uint16_t HTTP_PORT = 80;
-static constexpr uint32_t WIFI_RECONNECT_MS = 10000;
 
 // CAN message identifiers (standard 11-bit frames)
 static constexpr uint32_t ID_THROTTLE = 0x100; // data[0]: 0-100 %
@@ -55,9 +54,7 @@ ReceivedFrame frameLog[FRAME_LOG_SIZE];
 size_t frameLogHead = 0;
 
 WebServer server(HTTP_PORT);
-uint32_t lastWifiAttempt = 0;
-const char *wifiSsid = WIFI_SSID;
-const char *wifiPassword = WIFI_PASSWORD;
+bool apStarted = false;
 
 // ---- Helpers for Wi-Fi telemetry ----
 bool isWarmingUp();
@@ -250,30 +247,18 @@ void handleRoot() {
     client.stop();
 }
 
-void ensureWifi() {
-    if (WiFi.status() == WL_CONNECTED) {
-        return;
-    }
+void ensureAccessPoint() {
+    if (apStarted) return;
 
-    uint32_t now = millis();
-    if (now - lastWifiAttempt < WIFI_RECONNECT_MS) {
-        return;
-    }
-    lastWifiAttempt = now;
-
-    Serial.printf("Connecting to Wi-Fi SSID '%s'...\n", wifiSsid);
-    WiFi.begin(wifiSsid, wifiPassword);
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
-        delay(200);
-        Serial.print('.');
-    }
-    Serial.println();
-    if (WiFi.status() == WL_CONNECTED) {
-        Serial.print("Wi-Fi connected, IP: ");
-        Serial.println(WiFi.localIP());
+    Serial.printf("Starting Wi-Fi access point '%s'...\n", WIFI_SSID);
+    WiFi.mode(WIFI_AP);
+    if (WiFi.softAP(WIFI_SSID, WIFI_PASSWORD)) {
+        apStarted = true;
+        Serial.print("AP ready, connect to http://");
+        Serial.print(WiFi.softAPIP());
+        Serial.println('/');
     } else {
-        Serial.println("Wi-Fi connect timeout");
+        Serial.println("Failed to start AP");
     }
 }
 
@@ -453,14 +438,14 @@ void setup() {
     delay(500);
 
     Serial.println("Booting CAN LED firmware...");
-    Serial.printf("Using SSID: '%s'\n", wifiSsid);
+    Serial.printf("AP SSID: '%s'\n", WIFI_SSID);
 
     FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
     FastLED.setBrightness(LED_BRIGHTNESS);
 
     configureCan();
 
-    ensureWifi();
+    ensureAccessPoint();
     setupServer();
 }
 
@@ -483,7 +468,7 @@ void loop() {
 
     FastLED.show();
 
-    ensureWifi();
+    ensureAccessPoint();
     server.handleClient();
 }
 
