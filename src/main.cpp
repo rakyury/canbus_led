@@ -68,6 +68,28 @@ bool ledStripInitialized = false;
 
 CRGB leds[LED_COUNT];
 
+// Optimized: Pre-computed lookup table for throttle/RPM bar lengths
+// Avoids multiplication and division in hot path
+struct LookupTables {
+    uint8_t throttleLedCount[101];  // throttle % -> LED count
+    uint16_t rpmLedCount[LED_COUNT + LED_COUNT/5 + 1]; // LED position -> RPM threshold
+
+    void init(uint16_t redline) {
+        // Pre-compute throttle percentage to LED count mapping
+        for (int i = 0; i <= 100; ++i) {
+            throttleLedCount[i] = (i * LED_COUNT + 50) / 100;
+        }
+
+        // Pre-compute RPM thresholds for each LED position
+        uint32_t maxLit = LED_COUNT + LED_COUNT / 5;
+        for (uint32_t i = 0; i <= maxLit; ++i) {
+            rpmLedCount[i] = (i * redline + LED_COUNT / 2) / LED_COUNT;
+        }
+    }
+};
+
+LookupTables lookupTables;
+
 struct VehicleState {
     uint8_t throttlePercent = 0;
     uint8_t brakePercent = 0;
@@ -127,29 +149,30 @@ void setupServer();
 bool isWarmingUp();
 bool isPanicError();
 
-String activeModes() {
-    String modes = "base"; // base visualization of throttle/rpm/temp
-    if (state.brakePercent > 0) modes += ", brake";
-    if (state.handBrakePercent > 0) modes += ", handbrake";
-    if (state.clutchPercent > 0) modes += ", clutch";
-    if (state.revLimiter) modes += ", rev_limiter";
-    if (state.rpm >= state.rpmRedline) modes += ", redline";
-    if (state.alsActive) modes += ", als";
-    if (isWarmingUp()) modes += ", warming_up";
-    if (isPanicError()) modes += ", panic_oil";
-    if (state.ignitionOn && state.rpm == 0) modes += ", ignition_on_engine_off";
-    return modes;
+// Optimized: use buffer to avoid String reallocations
+void activeModes(char* buf, size_t bufSize) {
+    int pos = snprintf(buf, bufSize, "base");
+    if (state.brakePercent > 0 && pos < (int)bufSize - 10) pos += snprintf(buf + pos, bufSize - pos, ", brake");
+    if (state.handBrakePercent > 0 && pos < (int)bufSize - 15) pos += snprintf(buf + pos, bufSize - pos, ", handbrake");
+    if (state.clutchPercent > 0 && pos < (int)bufSize - 10) pos += snprintf(buf + pos, bufSize - pos, ", clutch");
+    if (state.revLimiter && pos < (int)bufSize - 15) pos += snprintf(buf + pos, bufSize - pos, ", rev_limiter");
+    if (state.rpm >= state.rpmRedline && pos < (int)bufSize - 12) pos += snprintf(buf + pos, bufSize - pos, ", redline");
+    if (state.alsActive && pos < (int)bufSize - 7) pos += snprintf(buf + pos, bufSize - pos, ", als");
+    if (isWarmingUp() && pos < (int)bufSize - 14) pos += snprintf(buf + pos, bufSize - pos, ", warming_up");
+    if (isPanicError() && pos < (int)bufSize - 13) pos += snprintf(buf + pos, bufSize - pos, ", panic_oil");
+    if (state.ignitionOn && state.rpm == 0 && pos < (int)bufSize - 27) pos += snprintf(buf + pos, bufSize - pos, ", ignition_on_engine_off");
 }
 
-bool isWarmingUp() {
+inline bool isWarmingUp() {
     return state.coolant10x < 600; // <60.0°C
 }
 
-bool isPanicError() {
+inline bool isPanicError() {
     return state.throttlePercent > 40 && state.oilPressure10kPa < 200; // <2.0 bar @ >40% TPS
 }
 
-bool isDataStale() {
+// Optimized: inline and reduce function call overhead
+inline bool isDataStale() {
     uint32_t now = millis();
     // Check the most recent update across all tracked data fields
     uint32_t lastUpdate = max(dataAge.lastRpmUpdate,
@@ -158,11 +181,11 @@ bool isDataStale() {
     return lastUpdate > 0 && (now - lastUpdate) > DATA_STALE_THRESHOLD_MS;
 }
 
-bool hasCanError() {
+inline bool hasCanError() {
     return canBusStatus != CanStatus::RUNNING;
 }
 
-bool hasWifiError() {
+inline bool hasWifiError() {
     return wifiStatus == WifiStatus::FAILED;
 }
 
@@ -183,12 +206,11 @@ void appendFrameToLog(const twai_message_t &msg) {
     frameLogHead = (frameLogHead + 1) % FRAME_LOG_SIZE;
 }
 
-String byteToHex(uint8_t b) {
-    const char hex[] = "0123456789ABCDEF";
-    String out;
-    out += hex[b >> 4];
-    out += hex[b & 0x0F];
-    return out;
+// Optimized: avoid String allocation, write directly to buffer
+void byteToHex(uint8_t b, char* out) {
+    static const char hex[] = "0123456789ABCDEF";
+    out[0] = hex[b >> 4];
+    out[1] = hex[b & 0x0F];
 }
 
 String formatTenths(uint16_t value10) {
@@ -207,17 +229,17 @@ String formatHundredths(uint16_t value100) {
     return String(buf);
 }
 
-String formatFrame(const twai_message_t &msg) {
-    String out = "ID 0x";
-    out += String(msg.identifier, HEX);
-    out += " DLC";
-    out += String(msg.data_length_code);
-    out += " DATA";
-    for (uint8_t i = 0; i < msg.data_length_code; ++i) {
-        out += " ";
-        out += byteToHex(msg.data[i]);
+// Optimized: use pre-allocated buffer to avoid heap fragmentation
+void formatFrame(const twai_message_t &msg, char* buf, size_t bufSize) {
+    char hexBuf[2];
+    int pos = snprintf(buf, bufSize, "ID 0x%03X DLC%u DATA", msg.identifier, msg.data_length_code);
+    for (uint8_t i = 0; i < msg.data_length_code && pos < (int)bufSize - 3; ++i) {
+        buf[pos++] = ' ';
+        byteToHex(msg.data[i], hexBuf);
+        buf[pos++] = hexBuf[0];
+        buf[pos++] = hexBuf[1];
     }
-    return out;
+    buf[pos] = '\0';
 }
 
 const char *boolWord(bool v) { return v ? "true" : "false"; }
@@ -262,7 +284,9 @@ void streamApiState() {
     client.print(",\"ignition_on\":");
     client.print(boolWord(state.ignitionOn));
     client.print(",\"active_modes\":\"");
-    client.print(activeModes());
+    char modesBuf[128];
+    activeModes(modesBuf, sizeof(modesBuf));
+    client.print(modesBuf);
     client.print("\",\"can_bus_status\":\"");
 
     // Add CAN bus status
@@ -306,6 +330,7 @@ void streamApiState() {
     client.print("},\"frames\":");
     client.print('[');
 
+    char hexBuf[2];
     bool first = true;
     for (size_t i = 0; i < FRAME_LOG_SIZE; ++i) {
         size_t idx = (frameLogHead + i) % FRAME_LOG_SIZE;
@@ -321,7 +346,8 @@ void streamApiState() {
         client.print(f.timestampMs);
         client.print(",\"data\":\"");
         for (uint8_t b = 0; b < f.dlc; ++b) {
-            client.print(byteToHex(f.data[b]));
+            byteToHex(f.data[b], hexBuf);
+            client.write(hexBuf, 2);
             if (b + 1 < f.dlc) client.print(' ');
         }
         client.print("\"}");
@@ -361,7 +387,9 @@ void handleRoot() {
     }
 
     client.print(F("<p><strong>Active modes:</strong> "));
-    client.print(activeModes());
+    char modesBuf[128];
+    activeModes(modesBuf, sizeof(modesBuf));
+    client.print(modesBuf);
     client.print(F("</p><ul>"));
     client.printf("<li>Throttle: %u%%</li>", state.throttlePercent);
     client.printf("<li>RPM: %u / redline %u</li>", state.rpm, state.rpmRedline);
@@ -398,8 +426,10 @@ void handleRoot() {
         client.print(F("</td><td>"));
         client.print(f.dlc);
         client.print(F("</td><td>"));
+        char hexBuf[2];
         for (uint8_t b = 0; b < f.dlc; ++b) {
-            client.print(byteToHex(f.data[b]));
+            byteToHex(f.data[b], hexBuf);
+            client.write(hexBuf, 2);
             if (b + 1 < f.dlc) client.print(' ');
         }
         client.print(F("</td><td>"));
@@ -477,8 +507,9 @@ void blendSegment(int start, int end, const CRGB &color) {
     }
 }
 
+// Optimized: use pre-computed lookup table
 void drawThrottleBar() {
-    int lit = (state.throttlePercent * LED_COUNT + 50) / 100;
+    int lit = lookupTables.throttleLedCount[state.throttlePercent];
     for (int i = 0; i < LED_COUNT; ++i) {
         leds[i] = (i < lit) ? CRGB::Green : CRGB::Black;
     }
@@ -523,27 +554,45 @@ void drawCoolantIndicator() {
     leds[LED_COUNT - 1] = color; // place indicator on the last pixel
 }
 
+// Optimized: combine all pedal overlays in a single pass
 void applyPedalOverlays() {
+    static constexpr int handbrakeSection = LED_COUNT / 4;
+    static constexpr int clutchSection = LED_COUNT / 5;
+    static constexpr int clutchStart = LED_COUNT - clutchSection;
+
+    // Pre-calculate colors if pedals are active
+    CRGB brakeColor = CRGB::Black;
+    uint8_t brakeIntensity = 0;
     if (state.brakePercent > 0) {
-        uint8_t intensity = map(state.brakePercent, 0, 100, 20, 255);
-        CRGB color(intensity, 0, 0);
-        for (int i = 0; i < LED_COUNT; ++i) {
-            leds[i] = blend(leds[i], color, intensity);
-        }
+        brakeIntensity = map(state.brakePercent, 0, 100, 20, 255);
+        brakeColor = CRGB(brakeIntensity, 0, 0);
     }
+
+    CRGB hbColor = CRGB::Black;
     if (state.handBrakePercent > 0) {
-        int section = LED_COUNT / 4;
         uint8_t intensity = map(state.handBrakePercent, 0, 100, 10, 220);
-        CRGB hb = CRGB(180, 0, 180);
-        hb.nscale8_video(intensity);
-        blendSegment(0, section, hb);
+        hbColor = CRGB(180, 0, 180);
+        hbColor.nscale8_video(intensity);
     }
+
+    CRGB clutchColor = CRGB::Black;
     if (state.clutchPercent > 0) {
-        int section = LED_COUNT / 5;
         uint8_t intensity = map(state.clutchPercent, 0, 100, 10, 220);
-        CRGB clutch = CRGB(0, 120, 255);
-        clutch.nscale8_video(intensity);
-        blendSegment(LED_COUNT - section, LED_COUNT, clutch);
+        clutchColor = CRGB(0, 120, 255);
+        clutchColor.nscale8_video(intensity);
+    }
+
+    // Single pass through the LED array
+    for (int i = 0; i < LED_COUNT; ++i) {
+        if (state.brakePercent > 0) {
+            leds[i] = blend(leds[i], brakeColor, brakeIntensity);
+        }
+        if (state.handBrakePercent > 0 && i < handbrakeSection) {
+            leds[i] = blend(leds[i], hbColor, 192);
+        }
+        if (state.clutchPercent > 0 && i >= clutchStart) {
+            leds[i] = blend(leds[i], clutchColor, 192);
+        }
     }
 }
 
@@ -699,8 +748,10 @@ void processFrame(const twai_message_t &msg) {
             break;
     }
 
+    char frameBuf[64];
+    formatFrame(msg, frameBuf, sizeof(frameBuf));
     Serial.print("CAN frame: ");
-    Serial.println(formatFrame(msg));
+    Serial.println(frameBuf);
 }
 
 void configureCan() {
@@ -819,6 +870,9 @@ void setup() {
     Serial.println("Booting CAN LED firmware...");
     Serial.printf("AP SSID: '%s'\n", WIFI_SSID);
 
+    // Initialize lookup tables for optimized calculations
+    lookupTables.init(state.rpmRedline);
+
     setupLeds();
     configureCan();
 
@@ -830,17 +884,30 @@ void loop() {
     // Monitor CAN bus health
     monitorCanHealth();
 
-    // Receive CAN messages
-    twai_message_t message;
-    esp_err_t result = twai_receive(&message, pdMS_TO_TICKS(10));
+    // Optimized: batch process CAN messages (up to 5 per loop iteration)
+    // This reduces overhead and improves throughput under high CAN traffic
+    static constexpr uint8_t MAX_MESSAGES_PER_LOOP = 5;
+    uint8_t messagesProcessed = 0;
 
-    if (result == ESP_OK) {
-        lastCanMessageTime = millis();
-        processFrame(message);
-        appendFrameToLog(message);
-    } else if (result != ESP_ERR_TIMEOUT) {
-        // Log non-timeout errors
-        Serial.printf("CAN receive error: %d\n", result);
+    while (messagesProcessed < MAX_MESSAGES_PER_LOOP) {
+        twai_message_t message;
+        // Use 0 timeout for batch processing (non-blocking after first message)
+        uint32_t timeout = (messagesProcessed == 0) ? pdMS_TO_TICKS(10) : 0;
+        esp_err_t result = twai_receive(&message, timeout);
+
+        if (result == ESP_OK) {
+            lastCanMessageTime = millis();
+            processFrame(message);
+            appendFrameToLog(message);
+            messagesProcessed++;
+        } else if (result != ESP_ERR_TIMEOUT) {
+            // Log non-timeout errors
+            Serial.printf("CAN receive error: %d\n", result);
+            break;
+        } else {
+            // No more messages available
+            break;
+        }
     }
 
     fill_solid(leds, LED_COUNT, CRGB::Black);
