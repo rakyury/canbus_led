@@ -10,12 +10,12 @@ static constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_22;  // Check silk screen, adj
 static constexpr int LED_PIN = 4;                      // Data pin for the addressable strip
 static constexpr int LED_COUNT = 60;                   // Number of LEDs on the strip
 static constexpr int LED_BRIGHTNESS = 180;             // 0-255
-static constexpr uint32_t CAN_BITRATE = 1'000'000;     // 1 Mbps
+static constexpr uint32_t CAN_BITRATE = 1000000;     // 1 Mbps
 
 static constexpr char WIFI_SSID[] = "YOUR_WIFI_SSID";        // Replace with your Wi-Fi network
 static constexpr char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD"; // Replace with your Wi-Fi password
 static constexpr uint16_t HTTP_PORT = 80;
-static constexpr uint32_t WIFI_RECONNECT_MS = 10'000;
+static constexpr uint32_t WIFI_RECONNECT_MS = 10000;
 
 // CAN message identifiers (standard 11-bit frames)
 static constexpr uint32_t ID_THROTTLE = 0x100; // data[0]: 0-100 %
