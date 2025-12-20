@@ -31,7 +31,7 @@ pio run --target upload --upload-port /dev/ttyUSB0
 pio device monitor -b 115200
 ```
 
-> The `platformio.ini` already enables link-time optimization and removes RTTI/exceptions to keep the final firmware as small as possible.
+> The `platformio.ini` trims RTTI/exceptions and enables aggressive dead-code elimination to keep the final firmware as small as possible while remaining compatible with the stock ESP32 toolchain.
 
 ## Logic tuning
 Key parameters live in [`src/main.cpp`](src/main.cpp):
