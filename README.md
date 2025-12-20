@@ -4,12 +4,13 @@ Example firmware for LilyGO® TTGO T-CAN48 (ESP32 + CAN) that shows vehicle stat
 
 ## Features
 - CAN bus speed 1 Mbps (ESP32 TWAI/CAN driver).
-- Renders throttle, brake, handbrake, RPM, coolant temperature, and rev limiter status.
+- Renders throttle, brake, handbrake, clutch pressures, RPM, coolant temperature, and rev limiter status.
 - Separate visuals for ALS (anti-lag), engine warmup (t<60°C), and panic if oil pressure is low while throttle is open.
+- Standby visualization when ignition is on but the engine is stopped.
 - Configurable CAN pins and LED pin.
 - Simple HTTP server to view the active lighting mode and recently received frames (JSON API `/api/state`) via the onboard access point.
 - Suitable for high-density WS2811-based 12 V FCOB addressable strips when powered separately (data remains 5 V logic).
-- Simple CAN protocol — see [`docs/CAN_PROTOCOL.md`](docs/CAN_PROTOCOL.md).
+- Simple CAN protocol — see [`docs/CAN_PROTOCOL.md`](docs/CAN_PROTOCOL.md) for pedal percentages and ignition state frames.
 
 ## Wiring
 See the diagram and notes in [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md). In short:
@@ -41,4 +42,4 @@ Key parameters live in [`src/main.cpp`](src/main.cpp):
 - `rpmRedline` inside `VehicleState` — redline point for visuals.
 - `WIFI_SSID`, `WIFI_PASSWORD` — Access point name/password defined at build time. Connect a phone/laptop to this AP and open `http://192.168.4.1/` for the web page or `http://192.168.4.1/api/state` for JSON.
 
-To adjust visuals edit `drawThrottleBar`, `drawRpmGradient`, `drawCoolantIndicator`, `applyBrakeOverlays`, `drawRevLimiter`.
+To adjust visuals edit `drawThrottleBar`, `drawRpmGradient`, `drawCoolantIndicator`, `applyPedalOverlays`, `drawRevLimiter`.

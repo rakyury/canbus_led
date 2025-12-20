@@ -18,25 +18,28 @@ static constexpr uint16_t HTTP_PORT = 80;
 
 // CAN message identifiers (standard 11-bit frames)
 static constexpr uint32_t ID_THROTTLE = 0x100; // data[0]: 0-100 %
-static constexpr uint32_t ID_BRAKES   = 0x101; // data[0] bit0: brake pedal, bit1: handbrake
+static constexpr uint32_t ID_PEDALS   = 0x101; // data[0]: brake 0-100 %, data[1]: handbrake 0-100 %, data[2]: clutch 0-100 %
 static constexpr uint32_t ID_RPM      = 0x102; // uint16_t little-endian: RPM
 static constexpr uint32_t ID_COOLANT  = 0x103; // uint16_t little-endian: temperature * 10 °C
 static constexpr uint32_t ID_REV_LIM  = 0x104; // data[0] non-zero when limiter active
 static constexpr uint32_t ID_ALS      = 0x105; // data[0] non-zero when anti-lag active
 static constexpr uint32_t ID_OIL_PRES = 0x106; // uint16_t little-endian: oil pressure * 10 kPa (≈0.1 bar)
+static constexpr uint32_t ID_IGNITION = 0x107; // data[0] non-zero when ignition is on
 
 CRGB leds[LED_COUNT];
 
 struct VehicleState {
     uint8_t throttlePercent = 0;
-    bool brakePedal = false;
-    bool handBrake = false;
+    uint8_t brakePercent = 0;
+    uint8_t handBrakePercent = 0;
+    uint8_t clutchPercent = 0;
     uint16_t rpm = 0;
     uint16_t rpmRedline = 6500;
     uint16_t coolant10x = 900; // 90.0°C
     bool revLimiter = false;
     bool alsActive = false;
     uint16_t oilPressure10kPa = 0; // 0.1 bar resolution (10 kPa)
+    bool ignitionOn = false;
 };
 
 VehicleState state;
@@ -62,13 +65,15 @@ bool isPanicError();
 
 String activeModes() {
     String modes = "base"; // base visualization of throttle/rpm/temp
-    if (state.brakePedal) modes += ", brake";
-    if (state.handBrake) modes += ", handbrake";
+    if (state.brakePercent > 0) modes += ", brake";
+    if (state.handBrakePercent > 0) modes += ", handbrake";
+    if (state.clutchPercent > 0) modes += ", clutch";
     if (state.revLimiter) modes += ", rev_limiter";
     if (state.rpm >= state.rpmRedline) modes += ", redline";
     if (state.alsActive) modes += ", als";
     if (isWarmingUp()) modes += ", warming_up";
     if (isPanicError()) modes += ", panic_oil";
+    if (state.ignitionOn && state.rpm == 0) modes += ", ignition_on_engine_off";
     return modes;
 }
 
@@ -146,10 +151,12 @@ void streamApiState() {
     client.print("\"oil_pressure_bar\":\"");
     client.print(formatHundredths(state.oilPressure10kPa * 10));
     client.print("\",");
-    client.print("\"brake_pedal\":");
-    client.print(boolWord(state.brakePedal));
-    client.print(",\"handbrake\":");
-    client.print(boolWord(state.handBrake));
+    client.print("\"brake_percent\":");
+    client.print(state.brakePercent);
+    client.print(",\"handbrake_percent\":");
+    client.print(state.handBrakePercent);
+    client.print(",\"clutch_percent\":");
+    client.print(state.clutchPercent);
     client.print(",\"rev_limiter\":");
     client.print(boolWord(state.revLimiter));
     client.print(",\"als_active\":");
@@ -158,6 +165,8 @@ void streamApiState() {
     client.print(boolWord(isWarmingUp()));
     client.print(",\"panic_error\":");
     client.print(boolWord(isPanicError()));
+    client.print(",\"ignition_on\":");
+    client.print(boolWord(state.ignitionOn));
     client.print(",\"active_modes\":\"");
     client.print(activeModes());
     client.print("\",\"frames\":");
@@ -209,12 +218,14 @@ void handleRoot() {
     client.print("C</li><li>Oil pressure: ");
     client.print(formatHundredths(state.oilPressure10kPa * 10));
     client.print(" bar</li>");
-    client.printf("<li>Brake: %s</li>", state.brakePedal ? "ON" : "OFF");
-    client.printf("<li>Handbrake: %s</li>", state.handBrake ? "ON" : "OFF");
+    client.printf("<li>Brake: %u%%</li>", state.brakePercent);
+    client.printf("<li>Handbrake: %u%%</li>", state.handBrakePercent);
+    client.printf("<li>Clutch: %u%%</li>", state.clutchPercent);
     client.printf("<li>Rev limiter: %s</li>", state.revLimiter ? "ON" : "OFF");
     client.printf("<li>ALS: %s</li>", state.alsActive ? "ON" : "OFF");
     client.printf("<li>Warming up: %s</li>", isWarmingUp() ? "YES" : "NO");
     client.printf("<li>Panic (low oil @ throttle): %s</li>", isPanicError() ? "YES" : "NO");
+    client.printf("<li>Ignition on: %s</li>", state.ignitionOn ? "YES" : "NO");
     client.print(F("</ul><h2>Recent CAN frames</h2><table><tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>"));
 
     uint32_t now = millis();
@@ -321,14 +332,27 @@ void drawCoolantIndicator() {
     leds[LED_COUNT - 1] = color; // place indicator on the last pixel
 }
 
-void applyBrakeOverlays() {
-    if (state.brakePedal) {
-        fill_solid(leds, LED_COUNT, CRGB::Red);
+void applyPedalOverlays() {
+    if (state.brakePercent > 0) {
+        uint8_t intensity = map(state.brakePercent, 0, 100, 20, 255);
+        CRGB color(intensity, 0, 0);
+        for (int i = 0; i < LED_COUNT; ++i) {
+            leds[i] = blend(leds[i], color, intensity);
+        }
     }
-    if (state.handBrake) {
-        // Purple overlay on the first quarter when handbrake set
+    if (state.handBrakePercent > 0) {
         int section = LED_COUNT / 4;
-        blendSegment(0, section, CRGB(200, 0, 200));
+        uint8_t intensity = map(state.handBrakePercent, 0, 100, 10, 220);
+        CRGB hb = CRGB(180, 0, 180);
+        hb.nscale8_video(intensity);
+        blendSegment(0, section, hb);
+    }
+    if (state.clutchPercent > 0) {
+        int section = LED_COUNT / 5;
+        uint8_t intensity = map(state.clutchPercent, 0, 100, 10, 220);
+        CRGB clutch = CRGB(0, 120, 255);
+        clutch.nscale8_video(intensity);
+        blendSegment(LED_COUNT - section, LED_COUNT, clutch);
     }
 }
 
@@ -367,6 +391,14 @@ void drawPanicError() {
     }
 }
 
+void drawIgnitionStandby() {
+    if (!state.ignitionOn || state.rpm != 0) return;
+    uint8_t pulse = beatsin8(5, 20, 80);
+    CRGB base = CRGB(80, 60, 0);
+    base.nscale8_video(pulse + 60);
+    fill_solid(leds, LED_COUNT, base);
+}
+
 // ---- CAN handling ----
 void processFrame(const twai_message_t &msg) {
     switch (msg.identifier) {
@@ -375,10 +407,15 @@ void processFrame(const twai_message_t &msg) {
                 state.throttlePercent = constrain(msg.data[0], (uint8_t)0, (uint8_t)100);
             }
             break;
-        case ID_BRAKES:
+        case ID_PEDALS:
             if (msg.data_length_code >= 1) {
-                state.brakePedal = msg.data[0] & 0x01;
-                state.handBrake = msg.data[0] & 0x02;
+                state.brakePercent = constrain(msg.data[0], (uint8_t)0, (uint8_t)100);
+            }
+            if (msg.data_length_code >= 2) {
+                state.handBrakePercent = constrain(msg.data[1], (uint8_t)0, (uint8_t)100);
+            }
+            if (msg.data_length_code >= 3) {
+                state.clutchPercent = constrain(msg.data[2], (uint8_t)0, (uint8_t)100);
             }
             break;
         case ID_RPM:
@@ -404,6 +441,11 @@ void processFrame(const twai_message_t &msg) {
         case ID_OIL_PRES:
             if (msg.data_length_code >= 2) {
                 state.oilPressure10kPa = msg.data[0] | (msg.data[1] << 8);
+            }
+            break;
+        case ID_IGNITION:
+            if (msg.data_length_code >= 1) {
+                state.ignitionOn = msg.data[0] != 0;
             }
             break;
         default:
@@ -456,14 +498,21 @@ void loop() {
         appendFrameToLog(message);
     }
 
+    fill_solid(leds, LED_COUNT, CRGB::Black);
+
     // Compose the LED pattern for the current state
-    drawThrottleBar();
-    drawRpmGradient();
-    drawCoolantIndicator();
-    applyBrakeOverlays();
-    drawRevLimiter();
-    drawAlsOverlay();
-    drawWarmingOverlay();
+    if (state.ignitionOn && state.rpm == 0) {
+        drawIgnitionStandby();
+        applyPedalOverlays();
+    } else {
+        drawThrottleBar();
+        drawRpmGradient();
+        drawCoolantIndicator();
+        applyPedalOverlays();
+        drawRevLimiter();
+        drawAlsOverlay();
+        drawWarmingOverlay();
+    }
     drawPanicError();
 
     FastLED.show();
