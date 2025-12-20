@@ -66,39 +66,6 @@ Preferences prefs;
 String wifiSsid = WIFI_SSID;
 String wifiPassword = WIFI_PASSWORD;
 
-// Static HTML template kept in flash to save RAM and code size
-static const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>CAN LED Telemetry</title>
-  <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;}code{background:#f2f2f2;padding:2px 4px;}table{border-collapse:collapse;}td,th{padding:6px 10px;border:1px solid #ddd;}</style>
-</head>
-<body>
-  <h1>CAN LED Telemetry</h1>
-  <p><strong>Active modes:</strong> %MODES%</p>
-  <ul>
-    <li>Throttle: %THR%%</li>
-    <li>RPM: %RPM% / redline %REDLINE%</li>
-    <li>Coolant: %COOLANT%C</li>
-    <li>Oil pressure: %OIL% bar</li>
-    <li>Brake: %BRAKE%</li>
-    <li>Handbrake: %HAND%</li>
-    <li>Rev limiter: %REV%</li>
-    <li>ALS: %ALS%</li>
-    <li>Warming up: %WARM%</li>
-    <li>Panic (low oil @ throttle): %PANIC%</li>
-  </ul>
-  <h2>Recent CAN frames</h2>
-  <table>
-    <tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>
-    %ROWS%
-  </table>
-  <p>JSON API: <a href="/api/state">/api/state</a></p>
-</body>
-</html>)rawliteral";
-
 // ---- Debug helpers ----
 void printBoth(const String &msg) {
     Serial.println(msg);
@@ -201,78 +168,125 @@ String formatFrame(const twai_message_t &msg) {
     return out;
 }
 
-void handleApiState() {
-    String json = "{";
-    json += "\"throttle_percent\":" + String(state.throttlePercent) + ",";
-    json += "\"rpm\":" + String(state.rpm) + ",";
-    json += "\"rpm_redline\":" + String(state.rpmRedline) + ",";
-    json += "\"coolant_c\":" + formatTenths(state.coolant10x) + ",";
-    json += "\"oil_pressure_bar\":" + formatHundredths(state.oilPressure10kPa * 10) + ",";
-    json += "\"brake_pedal\":" + String(state.brakePedal ? "true" : "false") + ",";
-    json += "\"handbrake\":" + String(state.handBrake ? "true" : "false") + ",";
-    json += "\"rev_limiter\":" + String(state.revLimiter ? "true" : "false") + ",";
-    json += "\"als_active\":" + String(state.alsActive ? "true" : "false") + ",";
-    json += "\"warming_up\":" + String(isWarmingUp() ? "true" : "false") + ",";
-    json += "\"panic_error\":" + String(isPanicError() ? "true" : "false") + ",";
-    json += "\"active_modes\":\"" + activeModes() + "\",";
-    json += "\"frames\":[";
+const char *boolWord(bool v) { return v ? "true" : "false"; }
+
+void streamApiState() {
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "application/json", "");
+    WiFiClient client = server.client();
+
+    client.print('{');
+    client.print("\"throttle_percent\":");
+    client.print(state.throttlePercent);
+    client.print(",\"rpm\":");
+    client.print(state.rpm);
+    client.print(",\"rpm_redline\":");
+    client.print(state.rpmRedline);
+    client.print(",\"coolant_c\":\"");
+    client.print(formatTenths(state.coolant10x));
+    client.print("\",");
+    client.print("\"oil_pressure_bar\":\"");
+    client.print(formatHundredths(state.oilPressure10kPa * 10));
+    client.print("\",");
+    client.print("\"brake_pedal\":");
+    client.print(boolWord(state.brakePedal));
+    client.print(",\"handbrake\":");
+    client.print(boolWord(state.handBrake));
+    client.print(",\"rev_limiter\":");
+    client.print(boolWord(state.revLimiter));
+    client.print(",\"als_active\":");
+    client.print(boolWord(state.alsActive));
+    client.print(",\"warming_up\":");
+    client.print(boolWord(isWarmingUp()));
+    client.print(",\"panic_error\":");
+    client.print(boolWord(isPanicError()));
+    client.print(",\"active_modes\":\"");
+    client.print(activeModes());
+    client.print("\",\"frames\":");
+    client.print('[');
+
     bool first = true;
     for (size_t i = 0; i < FRAME_LOG_SIZE; ++i) {
         size_t idx = (frameLogHead + i) % FRAME_LOG_SIZE;
         const ReceivedFrame &f = frameLog[idx];
-        if (f.dlc == 0 && f.timestampMs == 0) continue; // skip empty entries
-        if (!first) json += ",";
-        json += "{\"id\":\"0x" + String(f.id, HEX) + "\",";
-        json += "\"dlc\":" + String(f.dlc) + ",";
-        json += "\"timestamp_ms\":" + String(f.timestampMs) + ",";
-        json += "\"data\":\"";
+        if (f.dlc == 0 && f.timestampMs == 0) continue;
+        if (!first) client.print(',');
+        client.print('{');
+        client.print("\"id\":\"0x");
+        client.print(String(f.id, HEX));
+        client.print("\",\"dlc\":");
+        client.print(f.dlc);
+        client.print(",\"timestamp_ms\":");
+        client.print(f.timestampMs);
+        client.print(",\"data\":\"");
         for (uint8_t b = 0; b < f.dlc; ++b) {
-            json += byteToHex(f.data[b]);
-            if (b + 1 < f.dlc) json += " ";
+            client.print(byteToHex(f.data[b]));
+            if (b + 1 < f.dlc) client.print(' ');
         }
-        json += "\"}";
+        client.print("\"}");
         first = false;
     }
-    json += "]}";
+    client.print(']');
+    client.print('}');
+    client.stop();
+}
 
-    server.send(200, "application/json", json);
+void handleApiState() {
+    streamApiState();
 }
 
 void handleRoot() {
-    String html(FPSTR(HTML_TEMPLATE));
+    server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+    server.send(200, "text/html", "");
+    WiFiClient client = server.client();
 
-    html.replace("%MODES%", activeModes());
-    html.replace("%THR%", String(state.throttlePercent));
-    html.replace("%RPM%", String(state.rpm));
-    html.replace("%REDLINE%", String(state.rpmRedline));
-    html.replace("%COOLANT%", formatTenths(state.coolant10x));
-    html.replace("%OIL%", formatHundredths(state.oilPressure10kPa * 10));
-    html.replace("%BRAKE%", state.brakePedal ? "ON" : "OFF");
-    html.replace("%HAND%", state.handBrake ? "ON" : "OFF");
-    html.replace("%REV%", state.revLimiter ? "ON" : "OFF");
-    html.replace("%ALS%", state.alsActive ? "ON" : "OFF");
-    html.replace("%WARM%", isWarmingUp() ? "YES" : "NO");
-    html.replace("%PANIC%", isPanicError() ? "YES" : "NO");
+    client.print(F("<!doctype html><html><head><meta charset=\"utf-8\"/><title>CAN LED Telemetry</title><style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;}code{background:#f2f2f2;padding:2px 4px;}table{border-collapse:collapse;}td,th{padding:6px 10px;border:1px solid #ddd;}</style></head><body>"));
+    client.print(F("<h1>CAN LED Telemetry</h1><p><strong>Active modes:</strong> "));
+    client.print(activeModes());
+    client.print(F("</p><ul>"));
+    client.printf("<li>Throttle: %u%%</li>", state.throttlePercent);
+    client.printf("<li>RPM: %u / redline %u</li>", state.rpm, state.rpmRedline);
+    client.print("<li>Coolant: ");
+    client.print(formatTenths(state.coolant10x));
+    client.print("C</li><li>Oil pressure: ");
+    client.print(formatHundredths(state.oilPressure10kPa * 10));
+    client.print(" bar</li>");
+    client.printf("<li>Brake: %s</li>", state.brakePedal ? "ON" : "OFF");
+    client.printf("<li>Handbrake: %s</li>", state.handBrake ? "ON" : "OFF");
+    client.printf("<li>Rev limiter: %s</li>", state.revLimiter ? "ON" : "OFF");
+    client.printf("<li>ALS: %s</li>", state.alsActive ? "ON" : "OFF");
+    client.printf("<li>Warming up: %s</li>", isWarmingUp() ? "YES" : "NO");
+    client.printf("<li>Panic (low oil @ throttle): %s</li>", isPanicError() ? "YES" : "NO");
+    client.print(F("</ul><h2>Recent CAN frames</h2><table><tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>"));
 
-    String rows;
     uint32_t now = millis();
     size_t rowIndex = 0;
     for (size_t i = 0; i < FRAME_LOG_SIZE; ++i) {
         size_t idx = (frameLogHead + i) % FRAME_LOG_SIZE;
         const ReceivedFrame &f = frameLog[idx];
         if (f.dlc == 0 && f.timestampMs == 0) continue;
-        rows += "<tr><td>" + String(++rowIndex) + "</td><td>0x" + String(f.id, HEX) + "</td><td>" + String(f.dlc) + "</td><td>";
+        client.print(F("<tr><td>"));
+        client.print(++rowIndex);
+        client.print(F("</td><td>0x"));
+        client.print(String(f.id, HEX));
+        client.print(F("</td><td>"));
+        client.print(f.dlc);
+        client.print(F("</td><td>"));
         for (uint8_t b = 0; b < f.dlc; ++b) {
-            rows += byteToHex(f.data[b]);
-            if (b + 1 < f.dlc) rows += " ";
+            client.print(byteToHex(f.data[b]));
+            if (b + 1 < f.dlc) client.print(' ');
         }
-        rows += "</td><td>" + String(now - f.timestampMs) + "</td></tr>";
+        client.print(F("</td><td>"));
+        client.print(now - f.timestampMs);
+        client.print(F("</td></tr>"));
     }
-    if (rows.isEmpty()) {
-        rows = "<tr><td colspan=5>No frames yet</td></tr>";
+
+    if (rowIndex == 0) {
+        client.print(F("<tr><td colspan=5>No frames yet</td></tr>"));
     }
-    html.replace("%ROWS%", rows);
-    server.send(200, "text/html", html);
+
+    client.print(F("</table><p>JSON API: <a href=\"/api/state\">/api/state</a></p></body></html>"));
+    client.stop();
 }
 
 void ensureWifi() {

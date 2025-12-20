@@ -31,6 +31,8 @@ pio run --target upload --upload-port /dev/ttyUSB0
 pio device monitor -b 115200
 ```
 
+> The `platformio.ini` already enables link-time optimization and removes RTTI/exceptions to keep the final firmware as small as possible.
+
 ## Logic tuning
 Key parameters live in [`src/main.cpp`](src/main.cpp):
 - `CAN_TX_PIN`, `CAN_RX_PIN` — CAN transceiver pins.
