@@ -12,12 +12,12 @@ static constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_22;  // Check silk screen, adj
 static constexpr int LED_PIN = 4;                      // Data pin for the addressable strip
 static constexpr int LED_COUNT = 60;                   // Number of LEDs on the strip
 static constexpr int LED_BRIGHTNESS = 180;             // 0-255
-static constexpr uint32_t CAN_BITRATE = 1000000;     // 1 Mbps
+static constexpr uint32_t CAN_BITRATE = 1'000'000;     // 1 Mbps
 
 static constexpr char WIFI_SSID[] = "YOUR_WIFI_SSID";        // Replace with your Wi-Fi network
 static constexpr char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD"; // Replace with your Wi-Fi password
 static constexpr uint16_t HTTP_PORT = 80;
-static constexpr uint32_t WIFI_RECONNECT_MS = 10000;
+static constexpr uint32_t WIFI_RECONNECT_MS = 10'000;
 static constexpr char BT_DEVICE_NAME[] = "TCAN48-CFG";
 static constexpr char PREF_NAMESPACE[] = "can_led";
 
@@ -27,6 +27,8 @@ static constexpr uint32_t ID_BRAKES   = 0x101; // data[0] bit0: brake pedal, bit
 static constexpr uint32_t ID_RPM      = 0x102; // uint16_t little-endian: RPM
 static constexpr uint32_t ID_COOLANT  = 0x103; // uint16_t little-endian: temperature * 10 °C
 static constexpr uint32_t ID_REV_LIM  = 0x104; // data[0] non-zero when limiter active
+static constexpr uint32_t ID_ALS      = 0x105; // data[0] non-zero when anti-lag active
+static constexpr uint32_t ID_OIL_PRES = 0x106; // uint16_t little-endian: oil pressure * 10 kPa (≈0.1 bar)
 
 CRGB leds[LED_COUNT];
 
@@ -38,6 +40,8 @@ struct VehicleState {
     uint16_t rpmRedline = 6500;
     uint16_t coolant10x = 900; // 90.0°C
     bool revLimiter = false;
+    bool alsActive = false;
+    uint16_t oilPressure10kPa = 0; // 0.1 bar resolution (10 kPa)
 };
 
 VehicleState state;
@@ -71,13 +75,27 @@ void printBoth(const String &msg) {
 }
 
 // ---- Helpers for Wi-Fi telemetry ----
+bool isWarmingUp();
+bool isPanicError();
+
 String activeModes() {
     String modes = "base"; // base visualization of throttle/rpm/temp
     if (state.brakePedal) modes += ", brake";
     if (state.handBrake) modes += ", handbrake";
     if (state.revLimiter) modes += ", rev_limiter";
     if (state.rpm >= state.rpmRedline) modes += ", redline";
+    if (state.alsActive) modes += ", als";
+    if (isWarmingUp()) modes += ", warming_up";
+    if (isPanicError()) modes += ", panic_oil";
     return modes;
+}
+
+bool isWarmingUp() {
+    return state.coolant10x < 600; // <60.0°C
+}
+
+bool isPanicError() {
+    return state.throttlePercent > 40 && state.oilPressure10kPa < 200; // <2.0 bar @ >40% TPS
 }
 
 void appendFrameToLog(const twai_message_t &msg) {
@@ -140,9 +158,13 @@ void handleApiState() {
     json += "\"rpm\":" + String(state.rpm) + ",";
     json += "\"rpm_redline\":" + String(state.rpmRedline) + ",";
     json += "\"coolant_c\":" + String(state.coolant10x / 10.0f, 1) + ",";
+    json += "\"oil_pressure_bar\":" + String(state.oilPressure10kPa / 100.0f, 2) + ",";
     json += "\"brake_pedal\":" + String(state.brakePedal ? "true" : "false") + ",";
     json += "\"handbrake\":" + String(state.handBrake ? "true" : "false") + ",";
     json += "\"rev_limiter\":" + String(state.revLimiter ? "true" : "false") + ",";
+    json += "\"als_active\":" + String(state.alsActive ? "true" : "false") + ",";
+    json += "\"warming_up\":" + String(isWarmingUp() ? "true" : "false") + ",";
+    json += "\"panic_error\":" + String(isPanicError() ? "true" : "false") + ",";
     json += "\"active_modes\":\"" + activeModes() + "\",";
     json += "\"frames\":[";
     bool first = true;
@@ -183,9 +205,13 @@ void handleRoot() {
     <li>Throttle: %THR%%</li>
     <li>RPM: %RPM% / redline %REDLINE%</li>
     <li>Coolant: %COOLANT%C</li>
+    <li>Oil pressure: %OIL% bar</li>
     <li>Brake: %BRAKE%</li>
     <li>Handbrake: %HAND%</li>
     <li>Rev limiter: %REV%</li>
+    <li>ALS: %ALS%</li>
+    <li>Warming up: %WARM%</li>
+    <li>Panic (low oil @ throttle): %PANIC%</li>
   </ul>
   <h2>Recent CAN frames</h2>
   <table>
@@ -201,9 +227,13 @@ void handleRoot() {
     html.replace("%RPM%", String(state.rpm));
     html.replace("%REDLINE%", String(state.rpmRedline));
     html.replace("%COOLANT%", String(state.coolant10x / 10.0f, 1));
+    html.replace("%OIL%", String(state.oilPressure10kPa / 100.0f, 2));
     html.replace("%BRAKE%", state.brakePedal ? "ON" : "OFF");
     html.replace("%HAND%", state.handBrake ? "ON" : "OFF");
     html.replace("%REV%", state.revLimiter ? "ON" : "OFF");
+    html.replace("%ALS%", state.alsActive ? "ON" : "OFF");
+    html.replace("%WARM%", isWarmingUp() ? "YES" : "NO");
+    html.replace("%PANIC%", isPanicError() ? "YES" : "NO");
 
     String rows;
     uint32_t now = millis();
@@ -388,6 +418,33 @@ void drawRevLimiter() {
     }
 }
 
+void drawAlsOverlay() {
+    if (!state.alsActive) return;
+    uint8_t pulse = beatsin8(12, 80, 200);
+    CRGB color = CRGB(pulse, 80, 0); // amber pulse
+    for (int i = 0; i < LED_COUNT; ++i) {
+        leds[i] = blend(leds[i], color, 160);
+    }
+}
+
+void drawWarmingOverlay() {
+    if (!isWarmingUp()) return;
+    uint8_t pulse = beatsin8(6, 40, 120);
+    CRGB color = CRGB(0, 100, pulse + 40); // teal/blue breathing
+    for (int i = 0; i < LED_COUNT; ++i) {
+        leds[i] = blend(leds[i], color, 128);
+    }
+}
+
+void drawPanicError() {
+    if (!isPanicError()) return;
+    uint8_t pulse = beatsin8(18, 180, 255);
+    CRGB alert = (millis() / 200) % 2 ? CRGB::Red : CRGB::White;
+    for (int i = 0; i < LED_COUNT; ++i) {
+        leds[i] = blend(alert, CRGB(pulse, 0, 0), 200);
+    }
+}
+
 // ---- CAN handling ----
 void processFrame(const twai_message_t &msg) {
     switch (msg.identifier) {
@@ -415,6 +472,16 @@ void processFrame(const twai_message_t &msg) {
         case ID_REV_LIM:
             if (msg.data_length_code >= 1) {
                 state.revLimiter = msg.data[0] != 0;
+            }
+            break;
+        case ID_ALS:
+            if (msg.data_length_code >= 1) {
+                state.alsActive = msg.data[0] != 0;
+            }
+            break;
+        case ID_OIL_PRES:
+            if (msg.data_length_code >= 2) {
+                state.oilPressure10kPa = msg.data[0] | (msg.data[1] << 8);
             }
             break;
         default:
@@ -478,6 +545,9 @@ void loop() {
     drawCoolantIndicator();
     applyBrakeOverlays();
     drawRevLimiter();
+    drawAlsOverlay();
+    drawWarmingOverlay();
+    drawPanicError();
 
     FastLED.show();
 
