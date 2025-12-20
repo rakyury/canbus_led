@@ -2,6 +2,8 @@
 #include <FastLED.h>
 #include <WiFi.h>
 #include <WebServer.h>
+#include <BluetoothSerial.h>
+#include <Preferences.h>
 #include "driver/twai.h"
 
 // ----------- User configuration -----------
@@ -10,12 +12,14 @@ static constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_22;  // Check silk screen, adj
 static constexpr int LED_PIN = 4;                      // Data pin for the addressable strip
 static constexpr int LED_COUNT = 60;                   // Number of LEDs on the strip
 static constexpr int LED_BRIGHTNESS = 180;             // 0-255
-static constexpr uint32_t CAN_BITRATE = 1000000;     // 1 Mbps
+static constexpr uint32_t CAN_BITRATE = 1'000'000;     // 1 Mbps
 
 static constexpr char WIFI_SSID[] = "YOUR_WIFI_SSID";        // Replace with your Wi-Fi network
 static constexpr char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD"; // Replace with your Wi-Fi password
 static constexpr uint16_t HTTP_PORT = 80;
-static constexpr uint32_t WIFI_RECONNECT_MS = 10000;
+static constexpr uint32_t WIFI_RECONNECT_MS = 10'000;
+static constexpr char BT_DEVICE_NAME[] = "TCAN48-CFG";
+static constexpr char PREF_NAMESPACE[] = "can_led";
 
 // CAN message identifiers (standard 11-bit frames)
 static constexpr uint32_t ID_THROTTLE = 0x100; // data[0]: 0-100 %
@@ -52,6 +56,19 @@ size_t frameLogHead = 0;
 
 WebServer server(HTTP_PORT);
 uint32_t lastWifiAttempt = 0;
+BluetoothSerial btSerial;
+Preferences prefs;
+
+String wifiSsid = WIFI_SSID;
+String wifiPassword = WIFI_PASSWORD;
+
+// ---- Debug helpers ----
+void printBoth(const String &msg) {
+    Serial.println(msg);
+    if (btSerial.hasClient()) {
+        btSerial.println(msg);
+    }
+}
 
 // ---- Helpers for Wi-Fi telemetry ----
 String activeModes() {
@@ -72,11 +89,48 @@ void appendFrameToLog(const twai_message_t &msg) {
     frameLogHead = (frameLogHead + 1) % FRAME_LOG_SIZE;
 }
 
+// ---- Configuration persistence ----
+void loadPreferences() {
+    if (!prefs.begin(PREF_NAMESPACE, true)) {
+        Serial.println("Failed to open preferences (read)");
+        return;
+    }
+    String storedSsid = prefs.getString("ssid", wifiSsid);
+    String storedPass = prefs.getString("pass", wifiPassword);
+    prefs.end();
+
+    wifiSsid = storedSsid;
+    wifiPassword = storedPass;
+}
+
+void savePreferences() {
+    if (!prefs.begin(PREF_NAMESPACE, false)) {
+        Serial.println("Failed to open preferences (write)");
+        return;
+    }
+    prefs.putString("ssid", wifiSsid);
+    prefs.putString("pass", wifiPassword);
+    prefs.end();
+}
+
 String byteToHex(uint8_t b) {
     const char hex[] = "0123456789ABCDEF";
     String out;
     out += hex[b >> 4];
     out += hex[b & 0x0F];
+    return out;
+}
+
+String formatFrame(const twai_message_t &msg) {
+    String out = "ID 0x";
+    out += String(msg.identifier, HEX);
+    out += " DLC";
+    out += String(msg.data_length_code);
+    out += " DATA";
+    for (uint8_t i = 0; i < msg.data_length_code; ++i) {
+        out += " ";
+        out += byteToHex(msg.data[i]);
+    }
     return out;
 }
 
@@ -183,8 +237,8 @@ void ensureWifi() {
     }
     lastWifiAttempt = now;
 
-    Serial.printf("Connecting to Wi-Fi SSID '%s'...\n", WIFI_SSID);
-    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.printf("Connecting to Wi-Fi SSID '%s'...\n", wifiSsid.c_str());
+    WiFi.begin(wifiSsid.c_str(), wifiPassword.c_str());
     unsigned long start = millis();
     while (WiFi.status() != WL_CONNECTED && millis() - start < 5000) {
         delay(200);
@@ -196,6 +250,71 @@ void ensureWifi() {
         Serial.println(WiFi.localIP());
     } else {
         Serial.println("Wi-Fi connect timeout");
+    }
+}
+
+// ---- Bluetooth configurator ----
+void printHelp() {
+    printBoth("Commands:");
+    printBoth(" HELP               - show this help");
+    printBoth(" STATUS             - show Wi-Fi status and active modes");
+    printBoth(" SSID <name>        - set Wi-Fi SSID");
+    printBoth(" PASS <password>    - set Wi-Fi password");
+    printBoth(" SAVE               - persist Wi-Fi settings to flash");
+}
+
+void printStatus() {
+    String status = "Wi-Fi: ";
+    status += (WiFi.status() == WL_CONNECTED) ? "connected" : "disconnected";
+    status += " (SSID='" + wifiSsid + "')";
+    printBoth(status);
+    if (WiFi.status() == WL_CONNECTED) {
+        printBoth("IP: " + WiFi.localIP().toString());
+    }
+    printBoth("Active modes: " + activeModes());
+}
+
+void reconnectWifi() {
+    WiFi.disconnect();
+    lastWifiAttempt = 0;
+    ensureWifi();
+}
+
+void handleBluetoothCommand(const String &line) {
+    String trimmed = line;
+    trimmed.trim();
+    if (trimmed.equalsIgnoreCase("HELP")) {
+        printHelp();
+    } else if (trimmed.equalsIgnoreCase("STATUS")) {
+        printStatus();
+    } else if (trimmed.startsWith("SSID ")) {
+        wifiSsid = trimmed.substring(5);
+        printBoth("SSID updated to '" + wifiSsid + "'. Reconnecting...");
+        reconnectWifi();
+    } else if (trimmed.startsWith("PASS ")) {
+        wifiPassword = trimmed.substring(5);
+        printBoth("Password updated. Reconnecting...");
+        reconnectWifi();
+    } else if (trimmed.equalsIgnoreCase("SAVE")) {
+        savePreferences();
+        printBoth("Saved Wi-Fi settings to flash.");
+    } else if (!trimmed.isEmpty()) {
+        printBoth("Unknown command. Type HELP.");
+    }
+}
+
+void pollBluetooth() {
+    static String buffer;
+    while (btSerial.available()) {
+        char c = (char)btSerial.read();
+        if (c == '\n' || c == '\r') {
+            if (!buffer.isEmpty()) {
+                handleBluetoothCommand(buffer);
+                buffer.clear();
+            }
+        } else {
+            buffer += c;
+        }
     }
 }
 
@@ -301,6 +420,9 @@ void processFrame(const twai_message_t &msg) {
         default:
             break;
     }
+
+    Serial.print("CAN frame: ");
+    Serial.println(formatFrame(msg));
 }
 
 void configureCan() {
@@ -325,6 +447,14 @@ void configureCan() {
 void setup() {
     Serial.begin(115200);
     delay(500);
+
+    Serial.println("Booting CAN LED firmware...");
+    loadPreferences();
+    Serial.printf("Using SSID: '%s'\n", wifiSsid.c_str());
+
+    btSerial.begin(BT_DEVICE_NAME);
+    Serial.printf("Bluetooth configurator ready: device '%s'\n", BT_DEVICE_NAME);
+    printHelp();
 
     FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
     FastLED.setBrightness(LED_BRIGHTNESS);
@@ -353,5 +483,6 @@ void loop() {
 
     ensureWifi();
     server.handleClient();
+    pollBluetooth();
 }
 
