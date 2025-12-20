@@ -8,7 +8,7 @@ Example firmware for LilyGO® TTGO T-CAN48 (ESP32 + CAN) that shows vehicle stat
 - Separate visuals for ALS (anti-lag), engine warmup (t<60°C), and panic if oil pressure is low while throttle is open.
 - Configurable CAN pins and LED pin.
 - Simple HTTP server to view the active lighting mode and recently received frames (JSON API `/api/state`).
-- Bluetooth SPP configurator to set Wi‑Fi from a phone/laptop.
+- Suitable for high-density WS2811-based 12 V FCOB addressable strips when powered separately (data remains 5 V logic).
 - Simple CAN protocol — see [`docs/CAN_PROTOCOL.md`](docs/CAN_PROTOCOL.md).
 
 ## Wiring
@@ -31,7 +31,7 @@ pio run --target upload --upload-port /dev/ttyUSB0
 pio device monitor -b 115200
 ```
 
-> The `platformio.ini` trims RTTI/exceptions and enables aggressive dead-code elimination to keep the final firmware as small as possible while remaining compatible with the stock ESP32 toolchain.
+> The `platformio.ini` trims RTTI/exceptions and enables aggressive dead-code elimination to keep the final firmware as small as possible while remaining compatible with the stock ESP32 toolchain. Bluetooth has been removed to save flash; set Wi‑Fi credentials in `src/main.cpp`.
 
 ## Logic tuning
 Key parameters live in [`src/main.cpp`](src/main.cpp):
@@ -39,7 +39,6 @@ Key parameters live in [`src/main.cpp`](src/main.cpp):
 - `LED_PIN`, `LED_COUNT`, `LED_BRIGHTNESS` — LED strip parameters.
 - `ID_*` — CAN protocol identifiers.
 - `rpmRedline` inside `VehicleState` — redline point for visuals.
-- `WIFI_SSID`, `WIFI_PASSWORD` — Wi‑Fi credentials. After connecting, open `http://<device_ip>/` for the web page or `http://<device_ip>/api/state` for JSON.
-- Bluetooth: device `TCAN48-CFG`. Connect and send text commands: `HELP`, `STATUS`, `SSID <name>`, `PASS <password>`, `SAVE` (persists to flash). After changing SSID/password the module attempts to reconnect to Wi‑Fi.
+- `WIFI_SSID`, `WIFI_PASSWORD` — Wi‑Fi credentials defined at build time. After connecting, open `http://<device_ip>/` for the web page or `http://<device_ip>/api/state` for JSON.
 
 To adjust visuals edit `drawThrottleBar`, `drawRpmGradient`, `drawCoolantIndicator`, `applyBrakeOverlays`, `drawRevLimiter`.

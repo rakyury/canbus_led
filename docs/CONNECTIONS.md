@@ -7,10 +7,10 @@
 - Tie the board ground (GND) to vehicle ground for stable CAN operation.
 - If the tap point lacks termination, place a 120 Ω load between CANH and CANL (some T-CAN48 revisions provide a switch).
 
-## Addressable strip (WS2812/Neopixel)
-- Feed the strip with regulated 5 V power and share GND with the board.
+## Addressable strip (WS2812/Neopixel/WS2811 FCOB)
+- Feed the strip with regulated 5 V data power. For 12 V FCOB WS2811 strips, power the LEDs from 12 V while keeping the ESP32 and data reference at 5 V; tie grounds together.
 - Connect the strip data wire (DIN) to `GPIO4` (changeable in `src/main.cpp`).
-- For long strips add a 220–470 Ω series resistor on DIN and a 1000 µF capacitor across 5 V and GND at the strip start.
+- For long or high-density strips add a 220–470 Ω series resistor on DIN and a 1000 µF capacitor across 5 V and GND at the strip start. Consider a level shifter if the strip expects 5 V data.
 
 ## USB/UART
 - Logs stream at **115200 baud** to show CAN status and firmware boot details.
