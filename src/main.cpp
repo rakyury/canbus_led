@@ -12,7 +12,7 @@ static constexpr gpio_num_t CAN_RX_PIN = GPIO_NUM_22;  // Check silk screen, adj
 static constexpr int LED_PIN = 4;                      // Data pin for the addressable strip
 static constexpr int LED_COUNT = 60;                   // Number of LEDs on the strip
 static constexpr int LED_BRIGHTNESS = 180;             // 0-255
-static constexpr uint32_t CAN_BITRATE = 1000000;     // 1 Mbps
+static constexpr uint32_t CAN_BITRATE = 1000000;       // 1 Mbps
 
 static constexpr char WIFI_SSID[] = "YOUR_WIFI_SSID";        // Replace with your Wi-Fi network
 static constexpr char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD"; // Replace with your Wi-Fi password
@@ -65,6 +65,39 @@ Preferences prefs;
 
 String wifiSsid = WIFI_SSID;
 String wifiPassword = WIFI_PASSWORD;
+
+// Static HTML template kept in flash to save RAM and code size
+static const char HTML_TEMPLATE[] PROGMEM = R"rawliteral(
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>CAN LED Telemetry</title>
+  <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;}code{background:#f2f2f2;padding:2px 4px;}table{border-collapse:collapse;}td,th{padding:6px 10px;border:1px solid #ddd;}</style>
+</head>
+<body>
+  <h1>CAN LED Telemetry</h1>
+  <p><strong>Active modes:</strong> %MODES%</p>
+  <ul>
+    <li>Throttle: %THR%%</li>
+    <li>RPM: %RPM% / redline %REDLINE%</li>
+    <li>Coolant: %COOLANT%C</li>
+    <li>Oil pressure: %OIL% bar</li>
+    <li>Brake: %BRAKE%</li>
+    <li>Handbrake: %HAND%</li>
+    <li>Rev limiter: %REV%</li>
+    <li>ALS: %ALS%</li>
+    <li>Warming up: %WARM%</li>
+    <li>Panic (low oil @ throttle): %PANIC%</li>
+  </ul>
+  <h2>Recent CAN frames</h2>
+  <table>
+    <tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>
+    %ROWS%
+  </table>
+  <p>JSON API: <a href="/api/state">/api/state</a></p>
+</body>
+</html>)rawliteral";
 
 // ---- Debug helpers ----
 void printBoth(const String &msg) {
@@ -139,6 +172,22 @@ String byteToHex(uint8_t b) {
     return out;
 }
 
+String formatTenths(uint16_t value10) {
+    char buf[10];
+    uint16_t whole = value10 / 10;
+    uint16_t frac = value10 % 10;
+    snprintf(buf, sizeof(buf), "%u.%u", whole, frac);
+    return String(buf);
+}
+
+String formatHundredths(uint16_t value100) {
+    char buf[12];
+    uint16_t whole = value100 / 100;
+    uint16_t frac = value100 % 100;
+    snprintf(buf, sizeof(buf), "%u.%02u", whole, frac);
+    return String(buf);
+}
+
 String formatFrame(const twai_message_t &msg) {
     String out = "ID 0x";
     out += String(msg.identifier, HEX);
@@ -157,8 +206,8 @@ void handleApiState() {
     json += "\"throttle_percent\":" + String(state.throttlePercent) + ",";
     json += "\"rpm\":" + String(state.rpm) + ",";
     json += "\"rpm_redline\":" + String(state.rpmRedline) + ",";
-    json += "\"coolant_c\":" + String(state.coolant10x / 10.0f, 1) + ",";
-    json += "\"oil_pressure_bar\":" + String(state.oilPressure10kPa / 100.0f, 2) + ",";
+    json += "\"coolant_c\":" + formatTenths(state.coolant10x) + ",";
+    json += "\"oil_pressure_bar\":" + formatHundredths(state.oilPressure10kPa * 10) + ",";
     json += "\"brake_pedal\":" + String(state.brakePedal ? "true" : "false") + ",";
     json += "\"handbrake\":" + String(state.handBrake ? "true" : "false") + ",";
     json += "\"rev_limiter\":" + String(state.revLimiter ? "true" : "false") + ",";
@@ -190,44 +239,14 @@ void handleApiState() {
 }
 
 void handleRoot() {
-    String html = R"rawliteral(
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>CAN LED Telemetry</title>
-  <style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;}code{background:#f2f2f2;padding:2px 4px;}table{border-collapse:collapse;}td,th{padding:6px 10px;border:1px solid #ddd;}</style>
-</head>
-<body>
-  <h1>CAN LED Telemetry</h1>
-  <p><strong>Active modes:</strong> %MODES%</p>
-  <ul>
-    <li>Throttle: %THR%%</li>
-    <li>RPM: %RPM% / redline %REDLINE%</li>
-    <li>Coolant: %COOLANT%C</li>
-    <li>Oil pressure: %OIL% bar</li>
-    <li>Brake: %BRAKE%</li>
-    <li>Handbrake: %HAND%</li>
-    <li>Rev limiter: %REV%</li>
-    <li>ALS: %ALS%</li>
-    <li>Warming up: %WARM%</li>
-    <li>Panic (low oil @ throttle): %PANIC%</li>
-  </ul>
-  <h2>Recent CAN frames</h2>
-  <table>
-    <tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>
-    %ROWS%
-  </table>
-  <p>JSON API: <a href="/api/state">/api/state</a></p>
-</body>
-</html>)rawliteral";
+    String html(FPSTR(HTML_TEMPLATE));
 
     html.replace("%MODES%", activeModes());
     html.replace("%THR%", String(state.throttlePercent));
     html.replace("%RPM%", String(state.rpm));
     html.replace("%REDLINE%", String(state.rpmRedline));
-    html.replace("%COOLANT%", String(state.coolant10x / 10.0f, 1));
-    html.replace("%OIL%", String(state.oilPressure10kPa / 100.0f, 2));
+    html.replace("%COOLANT%", formatTenths(state.coolant10x));
+    html.replace("%OIL%", formatHundredths(state.oilPressure10kPa * 10));
     html.replace("%BRAKE%", state.brakePedal ? "ON" : "OFF");
     html.replace("%HAND%", state.handBrake ? "ON" : "OFF");
     html.replace("%REV%", state.revLimiter ? "ON" : "OFF");
@@ -365,24 +384,25 @@ void blendSegment(int start, int end, const CRGB &color) {
 }
 
 void drawThrottleBar() {
-    float fraction = state.throttlePercent / 100.0f;
-    int lit = static_cast<int>(fraction * LED_COUNT + 0.5f);
+    int lit = (state.throttlePercent * LED_COUNT + 50) / 100;
     for (int i = 0; i < LED_COUNT; ++i) {
         leds[i] = (i < lit) ? CRGB::Green : CRGB::Black;
     }
 }
 
 void drawRpmGradient() {
-    float fraction = (float)state.rpm / (float)state.rpmRedline;
-    fraction = constrain(fraction, 0.0f, 1.2f); // allow a bit beyond redline
-    int lit = static_cast<int>(fraction * LED_COUNT + 0.5f);
-    for (int i = 0; i < lit && i < LED_COUNT; ++i) {
+    uint32_t lit = (static_cast<uint32_t>(state.rpm) * LED_COUNT + state.rpmRedline / 2) / state.rpmRedline;
+    const uint32_t litCap = LED_COUNT + LED_COUNT / 5; // allow ~20% past redline
+    if (lit > litCap) {
+        lit = litCap;
+    }
+    for (uint32_t i = 0; i < lit && i < static_cast<uint32_t>(LED_COUNT); ++i) {
         // Color from blue (low) to yellow (near redline)
-        float ratio = (float)i / (float)LED_COUNT;
-        CRGB color = blend(CRGB::Blue, CRGB::Yellow, (uint8_t)(ratio * 255));
+        uint8_t ratio = (static_cast<uint32_t>(i) * 255) / LED_COUNT;
+        CRGB color = blend(CRGB::Blue, CRGB::Yellow, ratio);
         leds[i] = blend(leds[i], color, 128);
     }
-    if (fraction >= 1.0f) {
+    if (state.rpm >= state.rpmRedline) {
         // Past redline -> flashing red overlay
         uint8_t pulse = beatsin8(5, 64, 255);
         fill_solid(leds, LED_COUNT, CRGB(pulse, 0, 0));
@@ -390,12 +410,19 @@ void drawRpmGradient() {
 }
 
 void drawCoolantIndicator() {
-    // Map 60-110°C to blue->green->red
-    float tempC = state.coolant10x / 10.0f;
-    float norm = (tempC - 60.0f) / 50.0f;
-    norm = constrain(norm, 0.0f, 1.0f);
-    CRGB color = (norm < 0.5f) ? blend(CRGB::Blue, CRGB::Green, (uint8_t)(norm * 2 * 255))
-                               : blend(CRGB::Green, CRGB::Red, (uint8_t)((norm - 0.5f) * 2 * 255));
+    // Map 60-110°C to blue->green->red using integer math
+    uint16_t temp10 = state.coolant10x;
+    if (temp10 < 600) temp10 = 600;
+    if (temp10 > 1100) temp10 = 1100;
+
+    CRGB color;
+    if (temp10 <= 850) {
+        uint8_t mix = static_cast<uint32_t>(temp10 - 600) * 255 / 250; // 60-85C
+        color = blend(CRGB::Blue, CRGB::Green, mix);
+    } else {
+        uint8_t mix = static_cast<uint32_t>(temp10 - 850) * 255 / 250; // 85-110C
+        color = blend(CRGB::Green, CRGB::Red, mix);
+    }
     leds[LED_COUNT - 1] = color; // place indicator on the last pixel
 }
 

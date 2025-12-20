@@ -1,43 +1,43 @@
-# CAN LED status для TTGO T-CAN48
+# CAN LED status for TTGO T-CAN48
 
-Пример прошивки для LilyGO® TTGO T-CAN48 (ESP32 + CAN) для отображения статусов автомобиля на адресной ленте WS2812/Neopixel. Лента меняет вид в зависимости от команд, приходящих по CAN. Дополнительно есть веб-интерфейс по Wi‑Fi для мониторинга текущих значений и последних кадров CAN.
+Example firmware for LilyGO® TTGO T-CAN48 (ESP32 + CAN) that shows vehicle statuses on a WS2812/Neopixel strip. The strip appearance changes based on commands received over CAN. A built-in Wi‑Fi web interface shows current values and the latest CAN frames.
 
-## Возможности
-- Скорость шины 1 Мбит/с (TWAI/CAN драйвер ESP32).
-- Отрисовка состояния педали газа, тормоза, ручника, оборотов, температуры двигателя и отсечки.
-- Отдельные подсветки для ALS (anti-lag), прогрева двигателя (t<60°C) и аварии по давлению масла при сильном газе.
-- Настраиваемые пины CAN и пин ленты.
-- Простой веб-сервер (HTTP) для просмотра текущего режима подсветки и последних принятых кадров (JSON API `/api/state`).
-- Bluetooth‑конфигуратор (SPP) для настройки Wi‑Fi прямо с телефона/ноутбука.
-- Простой протокол кадров — см. [`docs/CAN_PROTOCOL.md`](docs/CAN_PROTOCOL.md).
+## Features
+- CAN bus speed 1 Mbps (ESP32 TWAI/CAN driver).
+- Renders throttle, brake, handbrake, RPM, coolant temperature, and rev limiter status.
+- Separate visuals for ALS (anti-lag), engine warmup (t<60°C), and panic if oil pressure is low while throttle is open.
+- Configurable CAN pins and LED pin.
+- Simple HTTP server to view the active lighting mode and recently received frames (JSON API `/api/state`).
+- Bluetooth SPP configurator to set Wi‑Fi from a phone/laptop.
+- Simple CAN protocol — see [`docs/CAN_PROTOCOL.md`](docs/CAN_PROTOCOL.md).
 
-## Подключение
-Схема подключения и советы приведены в [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md). Кратко:
-- CANH/CANL — к шине автомобиля, GND — к массе.
-- DIN ленты — к `GPIO4`, питание ленты 5 В.
-- Логи в Serial на 115200 бод + отладочные сообщения о принятых CAN кадрах.
+## Wiring
+See the diagram and notes in [`docs/CONNECTIONS.md`](docs/CONNECTIONS.md). In short:
+- CANH/CANL go to the vehicle bus, GND to chassis ground.
+- LED DIN goes to `GPIO4`, LED power is 5 V.
+- Serial logs at 115200 baud, including received CAN frame debug lines.
 
-## Сборка и прошивка
-Используется PlatformIO.
+## Build and flash
+PlatformIO is used for the project.
 
 ```bash
-# Установить зависимости и собрать
+# Install dependencies and build
 pio run
 
-# Залить прошивку на плату (указать нужный порт)
+# Flash the firmware (set the correct port)
 pio run --target upload --upload-port /dev/ttyUSB0
 
-# Открыть сериальный монитор
+# Open the serial monitor
 pio device monitor -b 115200
 ```
 
-## Настройка логики
-Ключевые параметры находятся в [`src/main.cpp`](src/main.cpp):
-- `CAN_TX_PIN`, `CAN_RX_PIN` — пины CAN-трансивера.
-- `LED_PIN`, `LED_COUNT`, `LED_BRIGHTNESS` — параметры ленты.
-- `ID_*` — идентификаторы кадров протокола.
-- `rpmRedline` в структуре `VehicleState` — точка срабатывания красной зоны.
-- `WIFI_SSID`, `WIFI_PASSWORD` — параметры подключения к Wi‑Fi. После соединения откройте `http://<ip_устройства>/` для веб-страницы или `http://<ip_устройства>/api/state` для JSON.
-- Bluetooth: устройство `TCAN48-CFG`. Подключитесь и отправляйте команды в виде текста: `HELP`, `STATUS`, `SSID <имя>`, `PASS <пароль>`, `SAVE` (сохраняет в flash). После смены SSID/пароля модуль пытается переподключиться к Wi‑Fi.
+## Logic tuning
+Key parameters live in [`src/main.cpp`](src/main.cpp):
+- `CAN_TX_PIN`, `CAN_RX_PIN` — CAN transceiver pins.
+- `LED_PIN`, `LED_COUNT`, `LED_BRIGHTNESS` — LED strip parameters.
+- `ID_*` — CAN protocol identifiers.
+- `rpmRedline` inside `VehicleState` — redline point for visuals.
+- `WIFI_SSID`, `WIFI_PASSWORD` — Wi‑Fi credentials. After connecting, open `http://<device_ip>/` for the web page or `http://<device_ip>/api/state` for JSON.
+- Bluetooth: device `TCAN48-CFG`. Connect and send text commands: `HELP`, `STATUS`, `SSID <name>`, `PASS <password>`, `SAVE` (persists to flash). After changing SSID/password the module attempts to reconnect to Wi‑Fi.
 
-Для изменения визуализаций редактируйте функции `drawThrottleBar`, `drawRpmGradient`, `drawCoolantIndicator`, `applyBrakeOverlays`, `drawRevLimiter`.
+To adjust visuals edit `drawThrottleBar`, `drawRpmGradient`, `drawCoolantIndicator`, `applyBrakeOverlays`, `drawRevLimiter`.

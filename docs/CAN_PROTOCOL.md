@@ -1,26 +1,26 @@
-# Предлагаемый формат кадров CAN
+# Suggested CAN frame format
 
-Вы можете подстроить идентификаторы под свою шину. Ниже предложенный вариант, который использует стандартные 11-битовые кадры.
+You can adjust identifiers to match your vehicle. The table below shows a simple option using standard 11-bit frames.
 
-| ID   | Описание | Поля данных |
-| ---: | -------- | ----------- |
-| 0x100 | Педаль газа | `data[0]` — процент нажатия 0–100. Остальные байты не используются. |
-| 0x101 | Тормоза/ручник | `data[0]` бит0 — педаль тормоза, бит1 — ручник. |
-| 0x102 | Обороты двигателя | `data[0..1]` — RPM (младший байт первым). |
-| 0x103 | Температура ОЖ | `data[0..1]` — температура ×10 °C (например, 900 = 90.0°C). |
-| 0x104 | Ограничитель оборотов | `data[0]` ≠ 0, если сработала отсечка. |
-| 0x105 | ALS (anti-lag) | `data[0]` ≠ 0, если активирован ALS. |
-| 0x106 | Давление масла | `data[0..1]` — давление ×10 kPa (≈0.1 бар). |
+| ID   | Description | Data fields |
+| ---: | ----------- | ----------- |
+| 0x100 | Throttle pedal | `data[0]` — pressed percent 0–100. Remaining bytes unused. |
+| 0x101 | Brakes/handbrake | `data[0]` bit0 — brake pedal, bit1 — handbrake. |
+| 0x102 | Engine RPM | `data[0..1]` — RPM (little endian). |
+| 0x103 | Coolant temperature | `data[0..1]` — temperature ×10 °C (e.g., 900 = 90.0°C). |
+| 0x104 | Rev limiter | `data[0]` ≠ 0 when limiter is active. |
+| 0x105 | ALS (anti-lag) | `data[0]` ≠ 0 when ALS is active. |
+| 0x106 | Oil pressure | `data[0..1]` — pressure ×10 kPa (≈0.1 bar). |
 
-## Логика отображения
-- **Газ:** зеленая шкала по всей длине. Заполненная часть пропорциональна проценту нажатия.
-- **Обороты:** поверх шкалы рисуется градиент синих/желтых оттенков по ширине пропорционально RPM. При превышении `rpmRedline` (по умолчанию 6500) вся лента пульсирует красным.
-- **Температура ОЖ:** последний светодиод показывает градиент от синего (60°C) к зеленому (85°C) и далее к красному (110°C).
-- **Тормоз:** вся лента перекрывается красным.
-- **Ручник:** на первой четверти добавляется фиолетовый оттенок.
-- **Отсечка:** добавляется желтое пульсирующее перекрытие по всей ленте.
-- **ALS:** вся лента мягко пульсирует янтарным, чтобы отметить активный anti-lag.
-- **Прогрев:** при `coolant < 60°C` накладывается мягкое «дышащее» голубое свечение.
-- **Авария давления масла:** если `throttle > 40%` и давление <2 бар — лента быстро мигает красно-белым. 
+## Display logic
+- **Throttle:** green bar across the strip. Filled length matches pedal percentage.
+- **RPM:** blue-to-yellow gradient drawn across the width proportional to RPM. When above `rpmRedline` (default 6500) the strip pulses red.
+- **Coolant temperature:** the last LED shows a gradient from blue (60°C) to green (85°C) to red (110°C).
+- **Brake:** the entire strip overlays red.
+- **Handbrake:** first quarter receives a purple overlay.
+- **Rev limiter:** yellow pulsing overlay on the entire strip.
+- **ALS:** amber pulse across the strip to indicate anti-lag enabled.
+- **Warmup:** when `coolant < 60°C` a soft breathing blue overlay is applied.
+- **Oil pressure panic:** if `throttle > 40%` and pressure <2 bar the strip strobes red/white rapidly.
 
-При необходимости меняйте соответствующие `ID_*` константы и параметры в `src/main.cpp`.
+Update the `ID_*` constants and related parameters in `src/main.cpp` as needed.

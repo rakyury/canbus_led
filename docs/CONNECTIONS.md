@@ -1,16 +1,16 @@
-# Подключение TTGO T-CAN48 к автомобилю и светодиодной ленте
+# Wiring TTGO T-CAN48 to a vehicle and LED strip
 
-## CAN-шина
-- Встроенный трансивер TTGO T-CAN48 подключается к выводам CANH и CANL автомобиля через клеммник на плате.
-- Скорость шины в прошивке зафиксирована на **1 Мбит/с**.
-- По умолчанию используются пины ESP32 `GPIO21` (TX) и `GPIO22` (RX). Уточните silk screen и при необходимости измените их в `src/main.cpp`.
-- Для стабильной работы CAN-шины подключите общую землю (GND) платы к массе автомобиля.
-- Если в автомобиле нет терминатора на участке подключения, установите нагрузку 120 Ом между CANH и CANL (на некоторых ревизиях T-CAN48 есть переключатель).
+## CAN bus
+- The built-in TTGO T-CAN48 transceiver connects to the vehicle CANH and CANL through the onboard terminal block.
+- Bus speed in firmware is fixed at **1 Mbps**.
+- Default ESP32 pins are `GPIO21` (TX) and `GPIO22` (RX). Check the silk screen and adjust in `src/main.cpp` if needed.
+- Tie the board ground (GND) to vehicle ground for stable CAN operation.
+- If the tap point lacks termination, place a 120 Ω load between CANH and CANL (some T-CAN48 revisions provide a switch).
 
-## Адресная лента (WS2812/Neopixel)
-- Питание 5 В подается на ленту напрямую от стабилизированного источника. Используйте общий GND с платой.
-- Сигнальный провод ленты (DIN) подключите к `GPIO4` (значение можно поменять в `src/main.cpp`).
-- Если длина ленты большая, поставьте согласующий резистор 220–470 Ом в разрыв сигнальной линии и конденсатор 1000 мкФ между 5 В и GND у начала ленты.
+## Addressable strip (WS2812/Neopixel)
+- Feed the strip with regulated 5 V power and share GND with the board.
+- Connect the strip data wire (DIN) to `GPIO4` (changeable in `src/main.cpp`).
+- For long strips add a 220–470 Ω series resistor on DIN and a 1000 µF capacitor across 5 V and GND at the strip start.
 
 ## USB/UART
-- Логи выводятся на **115200 бод**. Это помогает видеть статусы CAN и загрузку прошивки.
+- Logs stream at **115200 baud** to show CAN status and firmware boot details.
