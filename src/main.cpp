@@ -26,6 +26,46 @@ static constexpr uint32_t ID_ALS      = 0x105; // data[0] non-zero when anti-lag
 static constexpr uint32_t ID_OIL_PRES = 0x106; // uint16_t little-endian: oil pressure * 10 kPa (≈0.1 bar)
 static constexpr uint32_t ID_IGNITION = 0x107; // data[0] non-zero when ignition is on
 
+// Data validation ranges
+static constexpr uint16_t MAX_REASONABLE_RPM = 12000;
+static constexpr uint16_t MAX_REASONABLE_COOLANT = 1500; // 150°C
+static constexpr uint16_t MAX_REASONABLE_OIL_PRESSURE = 1000; // 10 bar (100 kPa)
+
+// Timeouts and retry configuration
+static constexpr uint32_t DATA_STALE_THRESHOLD_MS = 2000; // Data considered stale after 2s
+static constexpr uint32_t CAN_TIMEOUT_WARNING_MS = 5000; // Warn if no CAN messages for 5s
+static constexpr uint8_t MAX_WIFI_RETRIES = 5;
+static constexpr uint32_t WIFI_RETRY_INTERVAL_MS = 5000;
+
+// CAN bus status tracking
+enum class CanStatus {
+    NOT_INITIALIZED,
+    INITIALIZING,
+    RUNNING,
+    FAILED_DRIVER_INSTALL,
+    FAILED_START,
+    BUS_OFF,
+    ERROR_PASSIVE
+};
+
+// Wi-Fi status tracking
+enum class WifiStatus {
+    NOT_STARTED,
+    STARTING,
+    RUNNING,
+    FAILED
+};
+
+CanStatus canBusStatus = CanStatus::NOT_INITIALIZED;
+String canErrorMessage = "";
+uint32_t lastCanMessageTime = 0;
+
+WifiStatus wifiStatus = WifiStatus::NOT_STARTED;
+uint8_t wifiRetryCount = 0;
+uint32_t lastWifiRetry = 0;
+
+bool ledStripInitialized = false;
+
 CRGB leds[LED_COUNT];
 
 struct VehicleState {
@@ -44,6 +84,26 @@ struct VehicleState {
 
 VehicleState state;
 
+// Data age tracking for staleness detection
+struct DataAgeTracker {
+    uint32_t lastThrottleUpdate = 0;
+    uint32_t lastRpmUpdate = 0;
+    uint32_t lastCoolantUpdate = 0;
+    uint32_t lastOilPressureUpdate = 0;
+};
+
+DataAgeTracker dataAge;
+
+// Data validation failure tracking
+struct DataValidationStats {
+    uint32_t invalidRpmCount = 0;
+    uint32_t invalidCoolantCount = 0;
+    uint32_t invalidOilPressureCount = 0;
+    uint32_t totalMessagesProcessed = 0;
+};
+
+DataValidationStats validationStats;
+
 // ---- Telemetry buffers ----
 struct ReceivedFrame {
     uint32_t id = 0;
@@ -58,6 +118,10 @@ size_t frameLogHead = 0;
 
 WebServer server(HTTP_PORT);
 bool apStarted = false;
+bool serverStarted = false;
+
+// ---- Forward declarations ----
+void setupServer();
 
 // ---- Helpers for Wi-Fi telemetry ----
 bool isWarmingUp();
@@ -85,11 +149,36 @@ bool isPanicError() {
     return state.throttlePercent > 40 && state.oilPressure10kPa < 200; // <2.0 bar @ >40% TPS
 }
 
+bool isDataStale() {
+    uint32_t now = millis();
+    // Check the most recent update across all tracked data fields
+    uint32_t lastUpdate = max(dataAge.lastRpmUpdate,
+                              max(dataAge.lastThrottleUpdate,
+                                  max(dataAge.lastCoolantUpdate, dataAge.lastOilPressureUpdate)));
+    return lastUpdate > 0 && (now - lastUpdate) > DATA_STALE_THRESHOLD_MS;
+}
+
+bool hasCanError() {
+    return canBusStatus != CanStatus::RUNNING;
+}
+
+bool hasWifiError() {
+    return wifiStatus == WifiStatus::FAILED;
+}
+
 void appendFrameToLog(const twai_message_t &msg) {
     ReceivedFrame &slot = frameLog[frameLogHead];
     slot.id = msg.identifier;
-    slot.dlc = msg.data_length_code;
-    memcpy(slot.data, msg.data, msg.data_length_code);
+
+    // Validate DLC before using it to prevent buffer overflow
+    uint8_t dlc = msg.data_length_code;
+    if (dlc > 8) {
+        Serial.printf("ERROR: Invalid DLC %u in CAN ID 0x%03X, clamping to 8\n", dlc, msg.identifier);
+        dlc = 8;
+    }
+
+    slot.dlc = dlc;
+    memcpy(slot.data, msg.data, dlc);
     slot.timestampMs = millis();
     frameLogHead = (frameLogHead + 1) % FRAME_LOG_SIZE;
 }
@@ -138,6 +227,11 @@ void streamApiState() {
     server.send(200, "application/json", "");
     WiFiClient client = server.client();
 
+    if (!client.connected()) {
+        Serial.println("Client disconnected before API response");
+        return;
+    }
+
     client.print('{');
     client.print("\"throttle_percent\":");
     client.print(state.throttlePercent);
@@ -169,7 +263,47 @@ void streamApiState() {
     client.print(boolWord(state.ignitionOn));
     client.print(",\"active_modes\":\"");
     client.print(activeModes());
-    client.print("\",\"frames\":");
+    client.print("\",\"can_bus_status\":\"");
+
+    // Add CAN bus status
+    switch (canBusStatus) {
+        case CanStatus::NOT_INITIALIZED: client.print("not_initialized"); break;
+        case CanStatus::INITIALIZING: client.print("initializing"); break;
+        case CanStatus::RUNNING: client.print("running"); break;
+        case CanStatus::FAILED_DRIVER_INSTALL: client.print("failed_driver_install"); break;
+        case CanStatus::FAILED_START: client.print("failed_start"); break;
+        case CanStatus::BUS_OFF: client.print("bus_off"); break;
+        case CanStatus::ERROR_PASSIVE: client.print("error_passive"); break;
+        default: client.print("unknown"); break;
+    }
+
+    client.print("\",\"can_error_message\":\"");
+    client.print(canErrorMessage);
+    client.print("\",\"data_stale\":");
+    client.print(boolWord(isDataStale()));
+    client.print(",\"led_strip_ok\":");
+    client.print(boolWord(ledStripInitialized));
+    client.print(",\"wifi_status\":\"");
+
+    // Add Wi-Fi status
+    switch (wifiStatus) {
+        case WifiStatus::NOT_STARTED: client.print("not_started"); break;
+        case WifiStatus::STARTING: client.print("starting"); break;
+        case WifiStatus::RUNNING: client.print("running"); break;
+        case WifiStatus::FAILED: client.print("failed"); break;
+        default: client.print("unknown"); break;
+    }
+
+    client.print("\",\"validation_stats\":{");
+    client.print("\"total_messages\":");
+    client.print(validationStats.totalMessagesProcessed);
+    client.print(",\"invalid_rpm\":");
+    client.print(validationStats.invalidRpmCount);
+    client.print(",\"invalid_coolant\":");
+    client.print(validationStats.invalidCoolantCount);
+    client.print(",\"invalid_oil_pressure\":");
+    client.print(validationStats.invalidOilPressureCount);
+    client.print("},\"frames\":");
     client.print('[');
 
     bool first = true;
@@ -208,7 +342,25 @@ void handleRoot() {
     WiFiClient client = server.client();
 
     client.print(F("<!doctype html><html><head><meta charset=\"utf-8\"/><title>CAN LED Telemetry</title><style>body{font-family:Arial,Helvetica,sans-serif;margin:20px;}code{background:#f2f2f2;padding:2px 4px;}table{border-collapse:collapse;}td,th{padding:6px 10px;border:1px solid #ddd;}</style></head><body>"));
-    client.print(F("<h1>CAN LED Telemetry</h1><p><strong>Active modes:</strong> "));
+    client.print(F("<h1>CAN LED Telemetry</h1>"));
+
+    // Display system status warnings
+    if (canBusStatus != CanStatus::RUNNING) {
+        client.print(F("<p style='color:red;font-weight:bold;'>⚠ CAN BUS ERROR: "));
+        client.print(canErrorMessage);
+        client.print(F("</p>"));
+    }
+    if (wifiStatus == WifiStatus::FAILED) {
+        client.print(F("<p style='color:orange;font-weight:bold;'>⚠ Wi-Fi failed after multiple retries</p>"));
+    }
+    if (!ledStripInitialized) {
+        client.print(F("<p style='color:orange;font-weight:bold;'>⚠ LED strip initialization may have failed</p>"));
+    }
+    if (isDataStale()) {
+        client.print(F("<p style='color:orange;font-weight:bold;'>⚠ Vehicle data is stale (no recent updates)</p>"));
+    }
+
+    client.print(F("<p><strong>Active modes:</strong> "));
     client.print(activeModes());
     client.print(F("</p><ul>"));
     client.printf("<li>Throttle: %u%%</li>", state.throttlePercent);
@@ -226,6 +378,11 @@ void handleRoot() {
     client.printf("<li>Warming up: %s</li>", isWarmingUp() ? "YES" : "NO");
     client.printf("<li>Panic (low oil @ throttle): %s</li>", isPanicError() ? "YES" : "NO");
     client.printf("<li>Ignition on: %s</li>", state.ignitionOn ? "YES" : "NO");
+    client.print(F("</ul><h2>Data Validation</h2><ul>"));
+    client.printf("<li>Total CAN messages: %u</li>", validationStats.totalMessagesProcessed);
+    client.printf("<li>Invalid RPM: %u</li>", validationStats.invalidRpmCount);
+    client.printf("<li>Invalid coolant: %u</li>", validationStats.invalidCoolantCount);
+    client.printf("<li>Invalid oil pressure: %u</li>", validationStats.invalidOilPressureCount);
     client.print(F("</ul><h2>Recent CAN frames</h2><table><tr><th>#</th><th>ID</th><th>DLC</th><th>Data</th><th>Age (ms)</th></tr>"));
 
     uint32_t now = millis();
@@ -260,23 +417,54 @@ void handleRoot() {
 
 void ensureAccessPoint() {
     if (apStarted) return;
+    if (wifiStatus == WifiStatus::FAILED) return; // Don't retry indefinitely
 
-    Serial.printf("Starting Wi-Fi access point '%s'...\n", WIFI_SSID);
+    uint32_t now = millis();
+    if (wifiRetryCount > 0 && (now - lastWifiRetry) < WIFI_RETRY_INTERVAL_MS) {
+        return; // Wait before retrying
+    }
+
+    Serial.printf("Starting Wi-Fi access point '%s' (attempt %u/%u)...\n",
+                  WIFI_SSID, wifiRetryCount + 1, MAX_WIFI_RETRIES);
+    wifiStatus = WifiStatus::STARTING;
     WiFi.mode(WIFI_AP);
+
     if (WiFi.softAP(WIFI_SSID, WIFI_PASSWORD)) {
         apStarted = true;
+        wifiStatus = WifiStatus::RUNNING;
         Serial.print("AP ready, connect to http://");
         Serial.print(WiFi.softAPIP());
         Serial.println('/');
+
+        // Start HTTP server now that AP is running
+        setupServer();
     } else {
-        Serial.println("Failed to start AP");
+        wifiRetryCount++;
+        lastWifiRetry = now;
+
+        if (wifiRetryCount >= MAX_WIFI_RETRIES) {
+            wifiStatus = WifiStatus::FAILED;
+            Serial.println("Failed to start AP after maximum retries. Wi-Fi will be disabled.");
+        } else {
+            Serial.printf("Failed to start AP. Will retry in %u ms.\n", WIFI_RETRY_INTERVAL_MS);
+        }
     }
 }
 
 void setupServer() {
+    if (!apStarted) {
+        Serial.println("Cannot start HTTP server: AP not running");
+        return;
+    }
+
+    if (serverStarted) {
+        return; // Already started
+    }
+
     server.on("/", HTTP_GET, handleRoot);
     server.on("/api/state", HTTP_GET, handleApiState);
     server.begin();
+    serverStarted = true;
     Serial.printf("HTTP server started on port %u\n", HTTP_PORT);
 }
 
@@ -297,6 +485,9 @@ void drawThrottleBar() {
 }
 
 void drawRpmGradient() {
+    // Prevent division by zero
+    if (state.rpmRedline == 0) return;
+
     uint32_t lit = (static_cast<uint32_t>(state.rpm) * LED_COUNT + state.rpmRedline / 2) / state.rpmRedline;
     const uint32_t litCap = LED_COUNT + LED_COUNT / 5; // allow ~20% past redline
     if (lit > litCap) {
@@ -399,14 +590,39 @@ void drawIgnitionStandby() {
     fill_solid(leds, LED_COUNT, base);
 }
 
+// ---- Error visualization ----
+void drawCanError() {
+    if (canBusStatus == CanStatus::RUNNING) return;
+
+    // Blink red to indicate CAN error
+    uint8_t pulse = beatsin8(4, 0, 255);
+    fill_solid(leds, LED_COUNT, CRGB(pulse, 0, 0));
+}
+
+void drawStaleDataWarning() {
+    if (!isDataStale()) return;
+
+    // Dim yellow blink for stale data
+    uint8_t pulse = beatsin8(3, 20, 100);
+    CRGB warning = CRGB(pulse, pulse / 2, 0);
+    for (int i = 0; i < LED_COUNT; i += 4) {
+        leds[i] = warning;
+    }
+}
+
 // ---- CAN handling ----
 void processFrame(const twai_message_t &msg) {
+    uint32_t now = millis();
+    validationStats.totalMessagesProcessed++;
+
     switch (msg.identifier) {
         case ID_THROTTLE:
             if (msg.data_length_code >= 1) {
                 state.throttlePercent = constrain(msg.data[0], (uint8_t)0, (uint8_t)100);
+                dataAge.lastThrottleUpdate = now;
             }
             break;
+
         case ID_PEDALS:
             if (msg.data_length_code >= 1) {
                 state.brakePercent = constrain(msg.data[0], (uint8_t)0, (uint8_t)100);
@@ -418,36 +634,67 @@ void processFrame(const twai_message_t &msg) {
                 state.clutchPercent = constrain(msg.data[2], (uint8_t)0, (uint8_t)100);
             }
             break;
+
         case ID_RPM:
             if (msg.data_length_code >= 2) {
-                state.rpm = msg.data[0] | (msg.data[1] << 8);
+                uint16_t rpm = msg.data[0] | (msg.data[1] << 8);
+                if (rpm <= MAX_REASONABLE_RPM) {
+                    state.rpm = rpm;
+                    dataAge.lastRpmUpdate = now;
+                } else {
+                    validationStats.invalidRpmCount++;
+                    Serial.printf("Invalid RPM value: %u (max %u) [total invalid: %u]\n",
+                                  rpm, MAX_REASONABLE_RPM, validationStats.invalidRpmCount);
+                }
             }
             break;
+
         case ID_COOLANT:
             if (msg.data_length_code >= 2) {
-                state.coolant10x = msg.data[0] | (msg.data[1] << 8);
+                uint16_t coolant = msg.data[0] | (msg.data[1] << 8);
+                if (coolant <= MAX_REASONABLE_COOLANT) {
+                    state.coolant10x = coolant;
+                    dataAge.lastCoolantUpdate = now;
+                } else {
+                    validationStats.invalidCoolantCount++;
+                    Serial.printf("Invalid coolant temp: %u (max %u) [total invalid: %u]\n",
+                                  coolant, MAX_REASONABLE_COOLANT, validationStats.invalidCoolantCount);
+                }
             }
             break;
+
         case ID_REV_LIM:
             if (msg.data_length_code >= 1) {
                 state.revLimiter = msg.data[0] != 0;
             }
             break;
+
         case ID_ALS:
             if (msg.data_length_code >= 1) {
                 state.alsActive = msg.data[0] != 0;
             }
             break;
+
         case ID_OIL_PRES:
             if (msg.data_length_code >= 2) {
-                state.oilPressure10kPa = msg.data[0] | (msg.data[1] << 8);
+                uint16_t oilPres = msg.data[0] | (msg.data[1] << 8);
+                if (oilPres <= MAX_REASONABLE_OIL_PRESSURE) {
+                    state.oilPressure10kPa = oilPres;
+                    dataAge.lastOilPressureUpdate = now;
+                } else {
+                    validationStats.invalidOilPressureCount++;
+                    Serial.printf("Invalid oil pressure: %u (max %u) [total invalid: %u]\n",
+                                  oilPres, MAX_REASONABLE_OIL_PRESSURE, validationStats.invalidOilPressureCount);
+                }
             }
             break;
+
         case ID_IGNITION:
             if (msg.data_length_code >= 1) {
                 state.ignitionOn = msg.data[0] != 0;
             }
             break;
+
         default:
             break;
     }
@@ -457,22 +704,112 @@ void processFrame(const twai_message_t &msg) {
 }
 
 void configureCan() {
+    canBusStatus = CanStatus::INITIALIZING;
+
     twai_general_config_t g_config = TWAI_GENERAL_CONFIG_DEFAULT(CAN_TX_PIN, CAN_RX_PIN, TWAI_MODE_NORMAL);
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
     twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
 
-    if (twai_driver_install(&g_config, &t_config, &f_config) == ESP_OK) {
+    esp_err_t result = twai_driver_install(&g_config, &t_config, &f_config);
+    if (result == ESP_OK) {
         Serial.println("TWAI driver installed");
     } else {
-        Serial.println("TWAI driver install failed");
+        canBusStatus = CanStatus::FAILED_DRIVER_INSTALL;
+        canErrorMessage = "Driver install failed (error " + String(result) + "). Check GPIO pins.";
+        Serial.println(canErrorMessage);
         return;
     }
 
-    if (twai_start() == ESP_OK) {
+    result = twai_start();
+    if (result == ESP_OK) {
         Serial.println("CAN bus started at 1 Mbps");
+        canBusStatus = CanStatus::RUNNING;
+        canErrorMessage = "";
     } else {
-        Serial.println("Failed to start CAN bus");
+        canBusStatus = CanStatus::FAILED_START;
+        canErrorMessage = "Failed to start CAN bus (error " + String(result) + "). Check wiring and termination.";
+        Serial.println(canErrorMessage);
     }
+}
+
+// CAN bus health monitoring
+void monitorCanHealth() {
+    if (canBusStatus != CanStatus::RUNNING) return;
+
+    twai_status_info_t status;
+    esp_err_t result = twai_get_status_info(&status);
+    if (result == ESP_OK) {
+        // Check for bus-off condition
+        if (status.state == TWAI_STATE_BUS_OFF) {
+            canBusStatus = CanStatus::BUS_OFF;
+
+            // Attempt recovery
+            esp_err_t recovery_result = twai_initiate_recovery();
+            if (recovery_result == ESP_OK) {
+                Serial.println("Bus-off recovery initiated");
+                canErrorMessage = "CAN bus in BUS-OFF. Recovery in progress...";
+            } else {
+                Serial.printf("ERROR: Failed to initiate bus-off recovery (error %d)\n", recovery_result);
+                canErrorMessage = "CAN bus BUS-OFF. Recovery failed. Check wiring and restart device.";
+            }
+            Serial.println(canErrorMessage);
+            return;
+        }
+
+        // Check for error-passive (error counters between 128-255)
+        // According to CAN spec, error-passive occurs when error counter >= 128
+        if (status.rx_error_counter >= 128 || status.tx_error_counter >= 128) {
+            canBusStatus = CanStatus::ERROR_PASSIVE;
+            canErrorMessage = "CAN bus in ERROR-PASSIVE. RX errors: " + String(status.rx_error_counter) +
+                            ", TX errors: " + String(status.tx_error_counter);
+            Serial.println(canErrorMessage);
+        } else if (canBusStatus == CanStatus::ERROR_PASSIVE) {
+            // Recovered from error-passive (error counters back below 128)
+            canBusStatus = CanStatus::RUNNING;
+            canErrorMessage = "";
+            Serial.println("CAN bus recovered to normal state");
+        }
+
+        // Warn if queue is getting full
+        if (status.msgs_to_rx >= 16) {
+            Serial.printf("WARNING: CAN RX queue nearly full (%u messages)\n", status.msgs_to_rx);
+        }
+    } else {
+        // Failed to get CAN status info
+        Serial.printf("ERROR: Failed to get CAN status info (error %d)\n", result);
+    }
+
+    // Check for message timeout (only when CAN is actually running)
+    if (canBusStatus == CanStatus::RUNNING && lastCanMessageTime > 0 &&
+        (millis() - lastCanMessageTime) > CAN_TIMEOUT_WARNING_MS) {
+        Serial.println("WARNING: No CAN messages received for 5 seconds");
+    }
+}
+
+// LED strip self-test
+void setupLeds() {
+    FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
+    FastLED.setBrightness(LED_BRIGHTNESS);
+
+    // Self-test: brief RGB cycle
+    fill_solid(leds, LED_COUNT, CRGB::Black);
+    leds[0] = CRGB::Red;
+    FastLED.show();
+    delay(150);
+
+    leds[0] = CRGB::Green;
+    FastLED.show();
+    delay(150);
+
+    leds[0] = CRGB::Blue;
+    FastLED.show();
+    delay(150);
+
+    fill_solid(leds, LED_COUNT, CRGB::Black);
+    FastLED.show();
+
+    ledStripInitialized = true;
+    Serial.println("LED strip initialized and self-test complete");
 }
 
 void setup() {
@@ -482,9 +819,7 @@ void setup() {
     Serial.println("Booting CAN LED firmware...");
     Serial.printf("AP SSID: '%s'\n", WIFI_SSID);
 
-    FastLED.addLeds<NEOPIXEL, LED_PIN>(leds, LED_COUNT);
-    FastLED.setBrightness(LED_BRIGHTNESS);
-
+    setupLeds();
     configureCan();
 
     ensureAccessPoint();
@@ -492,19 +827,34 @@ void setup() {
 }
 
 void loop() {
+    // Monitor CAN bus health
+    monitorCanHealth();
+
+    // Receive CAN messages
     twai_message_t message;
-    if (twai_receive(&message, pdMS_TO_TICKS(10)) == ESP_OK) {
+    esp_err_t result = twai_receive(&message, pdMS_TO_TICKS(10));
+
+    if (result == ESP_OK) {
+        lastCanMessageTime = millis();
         processFrame(message);
         appendFrameToLog(message);
+    } else if (result != ESP_ERR_TIMEOUT) {
+        // Log non-timeout errors
+        Serial.printf("CAN receive error: %d\n", result);
     }
 
     fill_solid(leds, LED_COUNT, CRGB::Black);
 
-    // Compose the LED pattern for the current state
-    if (state.ignitionOn && state.rpm == 0) {
+    // Check for critical errors first
+    if (canBusStatus != CanStatus::RUNNING) {
+        drawCanError();
+    } else if (state.ignitionOn && state.rpm == 0) {
+        // Ignition standby mode
         drawIgnitionStandby();
         applyPedalOverlays();
+        drawStaleDataWarning();
     } else {
+        // Normal operation mode
         drawThrottleBar();
         drawRpmGradient();
         drawCoolantIndicator();
@@ -512,12 +862,17 @@ void loop() {
         drawRevLimiter();
         drawAlsOverlay();
         drawWarmingOverlay();
+        drawStaleDataWarning();
     }
+
+    // Panic error overrides everything except CAN error
     drawPanicError();
 
     FastLED.show();
 
     ensureAccessPoint();
-    server.handleClient();
+    if (apStarted) {
+        server.handleClient();
+    }
 }
 
