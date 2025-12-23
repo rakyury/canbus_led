@@ -2,6 +2,18 @@
 
 Example firmware for LilyGO® TTGO T-CAN48 (ESP32 + CAN) that shows vehicle statuses on a WS2812/Neopixel strip. The strip appearance changes based on commands received over CAN. A built-in Wi‑Fi access point hosts a web interface that shows current values and the latest CAN frames.
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Quick Start](docs/QUICK_START.md) | Get started in 10 minutes |
+| [Hardware Setup](docs/HARDWARE_SETUP.md) | Detailed wiring and installation guide |
+| [CAN Protocol](docs/CAN_PROTOCOL.md) | CAN message format specification |
+| [Link ECU Integration](docs/LINK_ECU_INTEGRATION.md) | Setup for Link ECU (Fury X, G4+, G4X) |
+| [CAN Emulator Guide](docs/EMULATOR_GUIDE.md) | Desktop tool for testing without vehicle |
+| [Usage Scenarios](docs/USAGE_SCENARIOS.md) | Track days, drag, drift, daily driving |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Problem solving guide |
+
 ## Features
 - CAN bus speed 1 Mbps (ESP32 TWAI/CAN driver).
 - Renders throttle, brake, handbrake, clutch pressures, RPM, coolant temperature, and rev limiter status.
@@ -152,3 +164,42 @@ To adjust LED patterns, edit these functions:
 2. Verify LED strip power (5V) and data (GPIO4) connections
 3. Try different LED strip or check for hardware damage
 4. Verify `LED_PIN` and `LED_COUNT` are correct
+
+For more troubleshooting help, see [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md).
+
+---
+
+## CAN Bus Emulator
+
+A desktop application for testing the LED controller without a real vehicle or ECU.
+
+### Features
+- Support for all 3 CAN protocols (Custom, Link ECU Generic Dashboard, Link ECU Generic Dashboard 2)
+- GUI with sliders and controls for all message parameters
+- Configurable transmission intervals per message
+- Message sequence reordering
+- Real-time logging with export
+- Quick presets (Idle, Cruise, Acceleration, Rev Limiter, Cold Start, Oil Warning)
+- Save/load configurations
+
+### Quick Start
+
+```bash
+cd tools/can_emulator
+pip install -r requirements.txt
+python can_emulator.py
+```
+
+### Supported CAN Adapters
+- **SLCAN**: CANable, USBtin, UCAN (~$25)
+- **SocketCAN**: Linux native CAN
+- **PCAN**: PEAK-System adapters
+- **Virtual**: Testing without hardware
+
+For detailed instructions, see [docs/EMULATOR_GUIDE.md](docs/EMULATOR_GUIDE.md).
+
+---
+
+## License
+
+MIT License. See LICENSE file for details.
