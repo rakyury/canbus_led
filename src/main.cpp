@@ -63,6 +63,10 @@ void setup() {
     #if ENABLE_DEBUG_SERIAL
     Serial.println("Setup complete. System ready.");
     Serial.printf("Free heap: %u bytes\n", ESP.getFreeHeap());
+    #if ENABLE_SERIAL_CAN_BRIDGE
+    Serial.println("Serial CAN Bridge enabled. Send frames as: CAN:ID:DLC:DATA");
+    Serial.println("Example: CAN:5F0:8:E803000064000000");
+    #endif
     #endif
 }
 
@@ -89,6 +93,11 @@ void loop() {
 
     // Process CAN messages or simulate demo data
     receiveAndProcessCan(state);
+
+    // Process Serial CAN Bridge (for testing without CAN hardware)
+    #if ENABLE_SERIAL_CAN_BRIDGE
+    processSerialCanBridge(state);
+    #endif
 
     // Monitor CAN health
     monitorCanHealth();

@@ -43,4 +43,13 @@ void formatFrame(const twai_message_t &msg, char* buf, size_t bufSize);
 void simulateDemoData(VehicleState &state);
 #endif
 
+// ========== Serial CAN Bridge ==========
+// Allows receiving CAN frames via Serial port for testing without CAN hardware
+// Format: "CAN:XXX:D:HHHHHHHHHHHHHHHH\n" where XXX=ID(hex), D=DLC, H=data(hex)
+// Example: "CAN:5F0:8:E803000064000000\n" = ID 0x5F0, DLC 8, data bytes
+#if ENABLE_SERIAL_CAN_BRIDGE
+void processSerialCanBridge(VehicleState &state);
+bool parseSerialCanFrame(const char* line, twai_message_t &msg);
+#endif
+
 #endif // CAN_HANDLER_H

@@ -11,6 +11,7 @@
 #define ENABLE_WEBSOCKET true
 #define ENABLE_DEMO_MODE false
 #define ENABLE_CAN_FILTER true
+#define ENABLE_SERIAL_CAN_BRIDGE true  // Receive CAN frames via Serial (for testing without CAN hardware)
 
 // ========== CAN Protocol Selection ==========
 // Choose ONE protocol to use:

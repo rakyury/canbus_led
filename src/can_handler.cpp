@@ -29,6 +29,11 @@ void formatFrame(const twai_message_t &msg, char* buf, size_t bufSize) {
     buf[pos] = '\0';
 }
 
+// Convert pressures from kPa * 10 (0.1 kPa resolution) to internal 0.1 bar units
+static inline uint16_t convertKpaTimes10ToBarTenth(uint16_t raw) {
+    return raw / 100;
+}
+
 // ========== CAN Configuration ==========
 void configureCan() {
     #if ENABLE_DEMO_MODE
@@ -48,17 +53,43 @@ void configureCan() {
     );
     twai_timing_config_t t_config = TWAI_TIMING_CONFIG_1MBITS();
 
-    #if ENABLE_CAN_FILTER
-    twai_filter_config_t f_config = {
-        .acceptance_code = (ID_THROTTLE << 21),
-        .acceptance_mask = ~(0x7FF << 21),
-        .single_filter = false
-    };
+    const twai_filter_config_t f_config = []() {
+        #if ENABLE_CAN_FILTER
+            #if CAN_PROTOCOL == 0
+            // Custom protocol: accept 0x100-0x107 (throttle/pedals/RPM/etc.)
+            return twai_filter_config_t{
+                .acceptance_code = (ID_THROTTLE << 21),
+                .acceptance_mask = ~(0x7F8 << 21), // ignore lower 3 bits to allow the block of IDs
+                .single_filter = true
+            };
+            #elif CAN_PROTOCOL == 1
+            // Link Generic Dashboard: accept 0x5F0-0x5F7 range
+            return twai_filter_config_t{
+                .acceptance_code = (LinkGenericDashboard::ID_RPM_TPS << 21),
+                .acceptance_mask = ~(0x7F8 << 21),
+                .single_filter = true
+            };
+            #else
+            // Generic Dashboard 2 uses extended IDs (0x2000+), accept all to avoid dropping frames
+            return TWAI_FILTER_CONFIG_ACCEPT_ALL();
+            #endif
+        #else
+            return TWAI_FILTER_CONFIG_ACCEPT_ALL();
+        #endif
+    }();
+
     #if ENABLE_DEBUG_SERIAL
-    Serial.println("CAN filter enabled (selective message acceptance)");
-    #endif
+    #if ENABLE_CAN_FILTER
+        #if CAN_PROTOCOL == 0
+        Serial.println("CAN filter: custom protocol IDs 0x100-0x107");
+        #elif CAN_PROTOCOL == 1
+        Serial.println("CAN filter: Link Generic Dashboard IDs 0x5F0-0x5F7");
+        #else
+        Serial.println("CAN filter: accept all (Generic Dashboard 2 / extended IDs)");
+        #endif
     #else
-    twai_filter_config_t f_config = TWAI_FILTER_CONFIG_ACCEPT_ALL();
+    Serial.println("CAN filter disabled (accepting all frames)");
+    #endif
     #endif
 
     esp_err_t result = twai_driver_install(&g_config, &t_config, &f_config);
@@ -176,7 +207,7 @@ void processFrameLinkGeneric(const twai_message_t &msg, VehicleState &state) {
             // Bytes 2-3: Ignition timing (16-bit signed, degrees * 10)
             if (msg.data_length_code >= 2) {
                 uint16_t fuelPres = msg.data[0] | (msg.data[1] << 8);
-                state.fuelPressure10kPa = fuelPres;
+                state.fuelPressure10kPa = convertKpaTimes10ToBarTenth(fuelPres);
             }
             if (msg.data_length_code >= 4) {
                 int16_t timing = (int16_t)(msg.data[2] | (msg.data[3] << 8));
@@ -229,7 +260,7 @@ void processFrameLinkGeneric(const twai_message_t &msg, VehicleState &state) {
             }
             if (msg.data_length_code >= 4) {
                 uint16_t oilPres = msg.data[2] | (msg.data[3] << 8);
-                state.oilPressure10kPa = oilPres;
+                state.oilPressure10kPa = convertKpaTimes10ToBarTenth(oilPres);
             }
             break;
 
@@ -531,3 +562,110 @@ void simulateDemoData(VehicleState &state) {
 }
 #endif
 
+// ========== Serial CAN Bridge ==========
+#if ENABLE_SERIAL_CAN_BRIDGE
+
+// Buffer for incoming serial data
+static char serialBuffer[64];
+static uint8_t serialBufferIndex = 0;
+
+// Convert hex char to nibble (0-15)
+static inline int8_t hexCharToNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    return -1;
+}
+
+// Parse hex string to bytes
+static bool parseHexBytes(const char* hex, uint8_t* out, uint8_t maxLen, uint8_t* actualLen) {
+    *actualLen = 0;
+    while (*hex && *(hex + 1) && *actualLen < maxLen) {
+        int8_t high = hexCharToNibble(*hex);
+        int8_t low = hexCharToNibble(*(hex + 1));
+        if (high < 0 || low < 0) return false;
+        out[*actualLen] = (high << 4) | low;
+        (*actualLen)++;
+        hex += 2;
+    }
+    return true;
+}
+
+// Parse serial line into CAN frame
+// Format: "CAN:XXX:D:HHHHHHHHHHHHHHHH" where XXX=ID(hex), D=DLC, H=data(hex)
+bool parseSerialCanFrame(const char* line, twai_message_t &msg) {
+    // Check prefix
+    if (strncmp(line, "CAN:", 4) != 0) {
+        return false;
+    }
+    line += 4;
+
+    // Parse ID (hex, up to 3 chars for standard 11-bit ID)
+    char* endPtr;
+    uint32_t id = strtoul(line, &endPtr, 16);
+    if (endPtr == line || *endPtr != ':') {
+        return false;
+    }
+    msg.identifier = id;
+    msg.extd = 0;  // Standard frame
+    msg.rtr = 0;   // Data frame
+    line = endPtr + 1;
+
+    // Parse DLC (1 digit, 0-8)
+    if (*line < '0' || *line > '8' || *(line + 1) != ':') {
+        return false;
+    }
+    msg.data_length_code = *line - '0';
+    line += 2;
+
+    // Parse data bytes (hex)
+    uint8_t actualLen = 0;
+    if (!parseHexBytes(line, msg.data, 8, &actualLen)) {
+        return false;
+    }
+
+    // Verify DLC matches data length
+    if (actualLen != msg.data_length_code) {
+        // Allow shorter data, pad with zeros
+        for (uint8_t i = actualLen; i < msg.data_length_code; i++) {
+            msg.data[i] = 0;
+        }
+    }
+
+    return true;
+}
+
+// Process incoming serial data for CAN frames
+void processSerialCanBridge(VehicleState &state) {
+    while (Serial.available()) {
+        char c = Serial.read();
+
+        if (c == '\n' || c == '\r') {
+            if (serialBufferIndex > 0) {
+                serialBuffer[serialBufferIndex] = '\0';
+
+                twai_message_t msg;
+                if (parseSerialCanFrame(serialBuffer, msg)) {
+                    processFrame(msg, state);
+                    #if ENABLE_DEBUG_SERIAL
+                    // Don't echo back to avoid loop, just confirm
+                    Serial.print("OK:");
+                    Serial.println(serialBuffer);
+                    #endif
+                } else if (serialBufferIndex > 4) {
+                    // Only warn for non-empty lines that look like commands
+                    #if ENABLE_DEBUG_SERIAL
+                    Serial.print("ERR:PARSE:");
+                    Serial.println(serialBuffer);
+                    #endif
+                }
+
+                serialBufferIndex = 0;
+            }
+        } else if (serialBufferIndex < sizeof(serialBuffer) - 1) {
+            serialBuffer[serialBufferIndex++] = c;
+        }
+    }
+}
+
+#endif // ENABLE_SERIAL_CAN_BRIDGE

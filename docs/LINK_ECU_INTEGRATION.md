@@ -7,6 +7,52 @@
 - **Link ECU Generic Dashboard** (CAN_PROTOCOL = 1) - Совместимость с Link Fury X и другими ECU Link
 - **Link ECU Generic Dashboard 2** (CAN_PROTOCOL = 2) - Новый расширенный протокол Link ECU
 
+## Тестирование без CAN оборудования (Serial CAN Bridge)
+
+Для тестирования без реального CAN адаптера можно использовать Serial CAN Bridge.
+ESP32 принимает CAN сообщения через Serial порт с компьютера.
+
+### Включение в прошивке
+
+В `src/config.h` убедитесь что включен флаг:
+```cpp
+#define ENABLE_SERIAL_CAN_BRIDGE true
+```
+
+### Формат сообщений
+
+```
+CAN:ID:DLC:DATA\n
+```
+
+- **ID** - CAN ID в hex (например `5F0`)
+- **DLC** - длина данных 0-8
+- **DATA** - данные в hex (например `E803000064000000`)
+
+Примеры:
+```
+CAN:5F0:8:E803000064000000   # RPM=1000, TPS=100
+CAN:5F3:4:5203C800           # Coolant=85°C, Air=20°C
+CAN:5F4:3:7005C0             # Battery=14V, Ignition ON
+```
+
+### Запуск эмулятора
+
+```bash
+python tools/serial_can_emulator.py COM3
+```
+
+Команды эмулятора:
+- `s` - отправить все фреймы
+- `c` - циклическая отправка (10 Hz)
+- `idle` - холостой ход
+- `accel` - симуляция разгона
+- `rev` - отсечка
+- `cold` - холодный старт
+- `oil` - низкое давление масла
+- `rpm N` - установить обороты
+- `tps N` - установить газ %
+
 ## Быстрая настройка
 
 ### Для Link Fury X (Generic Dashboard)

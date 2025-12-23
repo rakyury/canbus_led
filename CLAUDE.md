@@ -6,6 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is an ESP32-based CAN bus LED controller for LilyGO TTGO T-CAN48 boards. The firmware receives vehicle telemetry over CAN bus (1 Mbps) and visualizes it on a WS2812/Neopixel addressable LED strip. It also hosts a Wi-Fi access point with a web interface for real-time monitoring.
 
+**Supported CAN Protocols:**
+- Custom Protocol (original)
+- Link ECU Generic Dashboard (Fury X compatible)
+- Link ECU Generic Dashboard 2 (newer protocol)
+
 ## Build and Development Commands
 
 ### Build the firmware
@@ -15,9 +20,7 @@ pio run
 
 ### Flash to device
 ```bash
-# Replace /dev/ttyUSB0 with the correct port for your system
-# On macOS, typically /dev/cu.usbserial-* or /dev/cu.wchusbserial*
-pio run --target upload --upload-port /dev/ttyUSB0
+pio run --target upload --upload-port COM3
 ```
 
 ### Monitor serial output
@@ -30,103 +33,173 @@ pio device monitor -b 115200
 pio run --target clean
 ```
 
+### Test with Serial CAN Emulator (no CAN hardware needed)
+```bash
+python tools/serial_can_emulator.py COM3
+```
+
 ## Architecture and Code Structure
 
-### Core Components
+The codebase uses a modular architecture:
 
-**Main loop (src/main.cpp):** The firmware follows a simple polling architecture in `loop()`:
-1. Poll CAN bus for new frames (10ms timeout)
-2. Process received frames and update `VehicleState`
-3. Clear LED buffer
-4. Render LED pattern based on current state (layered rendering)
-5. Update FastLED display
-6. Service HTTP server and Wi-Fi AP
+```
+src/
+├── config.h          # All configuration and feature flags
+├── types.h           # Data structures (VehicleState, TripStatistics, etc.)
+├── can_handler.h/cpp # CAN communication and protocol parsing
+├── led_renderer.h/cpp # LED visualization functions
+├── web_server.h/cpp  # HTTP, WebSocket, OTA, NVS config
+└── main.cpp          # Main entry point (minimal coordinator)
+```
 
-**State management:** All vehicle telemetry is stored in a single `VehicleState` struct that is updated by CAN frame handlers. LED rendering functions read from this global state.
+### Core Modules
 
-**Layered rendering:** LED patterns are composited through multiple draw functions that blend colors:
-- Base layer: `drawThrottleBar()` or `drawIgnitionStandby()`
-- Overlays: `drawRpmGradient()`, `drawCoolantIndicator()`, `applyPedalOverlays()`
-- Special conditions: `drawRevLimiter()`, `drawAlsOverlay()`, `drawWarmingOverlay()`, `drawPanicError()`
+**config.h** - Central configuration:
+- Feature flags (`ENABLE_OTA`, `ENABLE_WEBSOCKET`, `ENABLE_SERIAL_CAN_BRIDGE`, etc.)
+- Hardware pins (CAN, LED)
+- CAN protocol selection (`CAN_PROTOCOL` = 0, 1, or 2)
+- CAN message IDs for all protocols
 
-Each render function uses FastLED's `blend()` to layer colors rather than overwriting, creating rich composite effects.
+**types.h** - Data structures:
+- `VehicleState` - all vehicle telemetry (RPM, throttle, coolant, oil, gear, etc.)
+- `TripStatistics` - tracking max values, averages
+- `UserConfig` - user preferences (redline, brightness, night mode)
+- `LookupTables` - pre-computed values for performance
 
-**CAN protocol:** The firmware expects simple standard 11-bit CAN frames with vehicle data. Frame identifiers and data formats are documented in `docs/CAN_PROTOCOL.md`. The `processFrame()` function maps CAN IDs to state updates.
+**can_handler.cpp** - CAN communication:
+- `configureCan()` - initialize TWAI driver with filtering
+- `processFrame()` - route to protocol-specific handler
+- `processFrameCustom()` - Custom protocol parser
+- `processFrameLinkGeneric()` - Link Generic Dashboard parser
+- `processFrameLinkGeneric2()` - Link Generic Dashboard 2 parser
+- `processSerialCanBridge()` - parse CAN frames from Serial port
 
-**Telemetry logging:** Recent CAN frames are stored in a circular buffer (`frameLog[]`) for display in the web interface. The web server streams JSON or HTML without blocking the main loop.
+**led_renderer.cpp** - LED visualization:
+- Layered rendering with `blend()` for compositing
+- `drawThrottleBar()`, `drawRpmGradient()`, `drawCoolantIndicator()`
+- `applyPedalOverlays()` - brake, handbrake, clutch
+- `drawShiftLight()`, `drawRevLimiter()`, `drawPanicError()`
 
-### Key Configuration Parameters
+**web_server.cpp** - Network services:
+- HTTP server with REST API
+- WebSocket for real-time updates (10 Hz)
+- OTA updates with LED progress visualization
+- NVS configuration persistence
 
-All user-configurable values are `constexpr` at the top of `src/main.cpp`:
-- **CAN pins:** `CAN_TX_PIN`, `CAN_RX_PIN` (default GPIO21/GPIO22)
-- **LED configuration:** `LED_PIN`, `LED_COUNT`, `LED_BRIGHTNESS`
-- **CAN protocol:** `ID_THROTTLE`, `ID_PEDALS`, `ID_RPM`, etc.
-- **Vehicle parameters:** `state.rpmRedline` (default 6500)
-- **Wi-Fi AP:** `WIFI_SSID`, `WIFI_PASSWORD` (hardcoded at compile time)
+### Main Loop Flow
 
-### Web Interface
+1. Reset watchdog timer
+2. Handle OTA updates
+3. Process WebSocket events
+4. Receive CAN messages (or Serial CAN Bridge)
+5. Monitor CAN health
+6. Update trip statistics
+7. Render LED layers (6 layers)
+8. Update FastLED display
+9. Handle HTTP requests
 
-The ESP32 runs a minimal HTTP server on port 80:
-- **/** - HTML dashboard showing current vehicle state and recent CAN frames
-- **/api/state** - JSON API endpoint with telemetry and frame log
+## Configuration
 
-Access by connecting to the `CANLED_AP` Wi-Fi network and navigating to `http://192.168.4.1/`
+### Switching CAN Protocol
+
+In `src/config.h`:
+```cpp
+#define CAN_PROTOCOL 1  // 0=Custom, 1=Link Generic, 2=Link Generic 2
+```
+
+### Feature Flags
+
+```cpp
+#define ENABLE_DEBUG_SERIAL true
+#define ENABLE_OTA true
+#define ENABLE_WATCHDOG true
+#define ENABLE_SHIFT_LIGHT true
+#define ENABLE_WEBSOCKET true
+#define ENABLE_SERIAL_CAN_BRIDGE true  // Testing without CAN hardware
+```
+
+### Link ECU CAN IDs
+
+**Generic Dashboard (Protocol 1):**
+- `0x5F0` - RPM & TPS
+- `0x5F3` - Coolant & Air temp
+- `0x5F4` - Battery & Flags
+- `0x5F5` - Gear & Oil pressure
+- `0x5F6` - Vehicle speed
+
+**Generic Dashboard 2 (Protocol 2):**
+- `0x2000` - RPM, TPS, ECT, IAT
+- `0x2001` - MAP, Battery, Fuel/Oil pressure
+- `0x2004` - Speed, Gear, Flags
+
+## Web Interface
+
+Connect to `CANLED_AP` WiFi (password: `canled123`):
+
+- `http://192.168.4.1/` - Dashboard
+- `GET /api/state` - Current telemetry (JSON)
+- `GET /api/stats` - Trip statistics
+- `POST /api/stats/reset` - Reset trip stats
+- `GET/POST /api/config` - Configuration
+- `GET /api/export/csv` - Export data
+- `WebSocket ws://192.168.4.1:81` - Real-time stream (10 Hz)
+
+## Testing with Serial CAN Bridge
+
+For testing without CAN hardware, enable `ENABLE_SERIAL_CAN_BRIDGE` and send frames via Serial:
+
+```
+CAN:5F0:8:E803000064000000
+```
+
+Format: `CAN:ID:DLC:HEXDATA`
+
+Use the Python emulator:
+```bash
+python tools/serial_can_emulator.py COM3
+```
+
+Commands: `idle`, `accel`, `rev`, `cold`, `oil`, `rpm N`, `tps N`
 
 ## Visual Logic
 
-The LED strip shows multiple overlapping states simultaneously:
+LED strip shows multiple overlapping states:
 
-**Primary visualization:**
-- Throttle: Green bar proportional to pedal position
-- RPM: Blue-to-yellow gradient, red pulsing when above redline
-- Coolant: Last LED shows temp gradient (blue 60°C → green 85°C → red 110°C)
+**Base layer:** Throttle bar (green) or ignition standby (amber breathing)
 
-**Pedal overlays:**
-- Brake: Red overlay on entire strip (intensity scales with pressure)
-- Handbrake: Purple overlay on first quarter
-- Clutch: Cyan overlay on last section
+**Overlays:**
+- RPM gradient: Blue → Yellow, red pulsing above redline
+- Coolant indicator: Last LED (blue 60°C → green 85°C → red 110°C)
+- Brake: Red overlay
+- Shift light: Blue flashing at shift point
 
-**Special modes:**
-- Rev limiter active: Yellow pulsing across strip
-- ALS (anti-lag): Amber pulsing
-- Engine warming (<60°C): Breathing blue overlay
-- Low oil pressure panic: Red/white strobe (when throttle >40% and oil <2 bar)
-- Ignition on, engine off: Amber breathing standby pattern
+**Special effects:**
+- Rev limiter: Yellow pulsing
+- Engine warming: Blue breathing (<60°C)
+- Low oil panic: Red/white strobe
 
-## Hardware Details
+## Hardware
 
-**Platform:** ESP32-based TTGO T-CAN48 with onboard CAN transceiver and terminal block
+- **MCU:** ESP32 (TTGO T-CAN48)
+- **CAN:** 1 Mbps, GPIO21/GPIO22
+- **LED:** WS2812/Neopixel, GPIO4, 60 LEDs
 
-**CAN bus:** Fixed at 1 Mbps using ESP32 TWAI driver. Accepts all frames (no filtering).
+## Typical Modifications
 
-**LED strip:** Any FastLED-compatible addressable strip (WS2812, WS2811, Neopixel). For 12V FCOB WS2811 strips, power LEDs from 12V but keep ESP32 and data line at 5V logic levels.
+**Change CAN protocol:** Set `CAN_PROTOCOL` in config.h
 
-**Power:** USB or external 5V to T-CAN48. LED strip requires separate power supply for high density/count strips.
+**Add new Link ECU parameter:** Add field to `VehicleState`, parse in `processFrameLinkGeneric()`
 
-## Build Configuration
+**Change redline:** Modify `userConfig.rpmRedline` or use web API
 
-The `platformio.ini` uses aggressive optimization flags:
-- `-Os` size optimization
-- `-fno-exceptions -fno-rtti` to reduce binary size
-- `-ffunction-sections -fdata-sections -Wl,--gc-sections` for dead code elimination
-- `CORE_DEBUG_LEVEL=0` disables debug logging
+**Add LED effect:** Create new draw function in led_renderer.cpp, call from main loop
 
-These settings minimize firmware size for ESP32 while maintaining compatibility with Arduino framework and FastLED library.
+## Tools
 
-## Typical Modification Workflows
+- `tools/serial_can_emulator.py` - Test without CAN hardware
+- `tools/can_emulator/` - GUI emulator for CAN adapters
 
-**Changing CAN frame IDs:** Update `ID_*` constants and corresponding cases in `processFrame()`.
+## Documentation
 
-**Adjusting visual effects:** Modify the draw functions (`drawThrottleBar`, `drawRpmGradient`, etc.). Each uses FastLED color blending and the `beatsin8()` function for pulsing effects.
-
-**Adding new CAN messages:** Add a new `ID_*` constant, add a field to `VehicleState`, handle it in `processFrame()`, and create a corresponding draw function if needed.
-
-**Tuning redline or temp thresholds:** Adjust `state.rpmRedline`, `isWarmingUp()` threshold, or `isPanicError()` conditions in `src/main.cpp`.
-
-## Important Notes
-
-- Serial logs at 115200 baud include CAN frame debug output
-- The access point starts automatically on boot; no client-mode Wi-Fi
-- CAN receive uses a 10ms timeout to avoid blocking LED updates
-- All LED rendering is non-blocking; patterns update at FastLED's maximum rate
-- The web server uses chunked transfer encoding to stream responses without buffering
+- `docs/LINK_ECU_INTEGRATION.md` - Link ECU setup guide
+- `docs/CAN_PROTOCOL.md` - CAN frame specifications
