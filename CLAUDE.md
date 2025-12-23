@@ -33,10 +33,25 @@ pio device monitor -b 115200
 pio run --target clean
 ```
 
-### Test with Serial CAN Emulator (no CAN hardware needed)
+### Test with Serial CAN Emulator GUI (no CAN hardware needed)
 ```bash
-python tools/serial_can_emulator.py COM3
+python tools/serial_can_emulator.py
 ```
+
+## Firmware Output
+
+After building, firmware files are located in:
+```
+.pio/build/lilygo_tcan48/
+├── firmware.bin      # Main firmware binary (upload this)
+├── firmware.elf      # ELF with debug symbols
+├── bootloader.bin    # ESP32 bootloader
+└── partitions.bin    # Partition table
+```
+
+**Memory usage (typical):**
+- RAM: ~16% (53 KB / 320 KB)
+- Flash: ~63% (826 KB / 1.3 MB)
 
 ## Architecture and Code Structure
 
@@ -146,20 +161,26 @@ Connect to `CANLED_AP` WiFi (password: `canled123`):
 
 ## Testing with Serial CAN Bridge
 
-For testing without CAN hardware, enable `ENABLE_SERIAL_CAN_BRIDGE` and send frames via Serial:
+For testing without CAN hardware, enable `ENABLE_SERIAL_CAN_BRIDGE` and use the GUI emulator:
 
+```bash
+python tools/serial_can_emulator.py
+```
+
+**GUI Emulator Features:**
+- COM port selection with auto-refresh
+- Protocol selection (Custom, Link Generic, Link Generic 2)
+- Real-time sliders: RPM, Throttle, Coolant, Oil pressure, Speed
+- Gear selector (N, 1-6)
+- Flags: Ignition, Rev Limiter, Launch Control
+- Presets: Idle, Cruise, Redline, Cold Start, Low Oil
+- Single send or cyclic transmission (10 Hz)
+
+**Serial Protocol Format:**
 ```
 CAN:5F0:8:E803000064000000
 ```
-
 Format: `CAN:ID:DLC:HEXDATA`
-
-Use the Python emulator:
-```bash
-python tools/serial_can_emulator.py COM3
-```
-
-Commands: `idle`, `accel`, `rev`, `cold`, `oil`, `rpm N`, `tps N`
 
 ## Visual Logic
 
@@ -196,8 +217,8 @@ LED strip shows multiple overlapping states:
 
 ## Tools
 
-- `tools/serial_can_emulator.py` - Test without CAN hardware
-- `tools/can_emulator/` - GUI emulator for CAN adapters
+- `tools/serial_can_emulator.py` - GUI emulator for testing via Serial (no CAN hardware needed)
+- `tools/can_emulator/` - Alternative CAN adapter emulator
 
 ## Documentation
 
