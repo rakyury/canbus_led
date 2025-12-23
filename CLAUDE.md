@@ -169,12 +169,12 @@ python tools/serial_can_emulator.py
 
 **GUI Emulator Features:**
 - COM port selection with auto-refresh
-- Protocol selection (Custom, Link Generic, Link Generic 2)
-- Real-time sliders: RPM, Throttle, Coolant, Oil pressure, Speed
-- Gear selector (N, 1-6)
-- Flags: Ignition, Rev Limiter, Launch Control
-- Presets: Idle, Cruise, Redline, Cold Start, Low Oil
-- Single send or cyclic transmission (10 Hz)
+- Protocol templates: Link Generic Dashboard, Link Generic Dashboard 2, Custom
+- Message Queue with Add/Delete/Up/Down/Toggle controls
+- Message Editor: edit ID, Name, DLC, Data bytes (B0-B7) in hex
+- Real-time preview of serial format
+- Real-time Log with timestamps and color-coded output
+- Single send or cyclic transmission with configurable interval
 
 **Serial Protocol Format:**
 ```
