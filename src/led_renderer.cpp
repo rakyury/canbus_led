@@ -257,3 +257,28 @@ void drawStaleDataWarning(bool isStale) {
         leds[i] = warning;
     }
 }
+
+// ========== LED Streaming (for emulator) ==========
+#if ENABLE_LED_STREAM
+static uint32_t lastLedStream = 0;
+static constexpr uint32_t LED_STREAM_INTERVAL = 33; // ~30 Hz
+
+void streamLedData() {
+    if (millis() - lastLedStream < LED_STREAM_INTERVAL) {
+        return;
+    }
+    lastLedStream = millis();
+
+    // Format: LED:count:RRGGBBRRGGBB... (hex encoded RGB values)
+    Serial.print("LED:");
+    Serial.print(LED_COUNT);
+    Serial.print(":");
+
+    for (int i = 0; i < LED_COUNT; ++i) {
+        char hex[7];
+        snprintf(hex, sizeof(hex), "%02X%02X%02X", leds[i].r, leds[i].g, leds[i].b);
+        Serial.print(hex);
+    }
+    Serial.println();
+}
+#endif

@@ -39,4 +39,9 @@ void blendSegment(int start, int end, const CRGB &color);
 bool isWarmingUp(const VehicleState &state);
 bool isPanicError(const VehicleState &state);
 
+// ========== LED Streaming (for emulator) ==========
+#if ENABLE_LED_STREAM
+void streamLedData();
+#endif
+
 #endif // LED_RENDERER_H
