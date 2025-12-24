@@ -144,6 +144,11 @@ void loop() {
     // Update LED strip
     FastLED.show();
 
+    // Stream LED data for emulator
+    #if ENABLE_LED_STREAM
+    streamLedData();
+    #endif
+
     // Handle HTTP server
     server.handleClient();
 }

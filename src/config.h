@@ -12,6 +12,7 @@
 #define ENABLE_DEMO_MODE false
 #define ENABLE_CAN_FILTER true
 #define ENABLE_SERIAL_CAN_BRIDGE true  // Receive CAN frames via Serial (for testing without CAN hardware)
+#define ENABLE_LED_STREAM true          // Stream LED colors via Serial (for LED strip emulator)
 
 // ========== CAN Protocol Selection ==========
 // Choose ONE protocol to use:

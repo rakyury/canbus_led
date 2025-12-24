@@ -131,6 +131,7 @@ In `src/config.h`:
 #define ENABLE_SHIFT_LIGHT true
 #define ENABLE_WEBSOCKET true
 #define ENABLE_SERIAL_CAN_BRIDGE true  // Testing without CAN hardware
+#define ENABLE_LED_STREAM true          // Stream LED colors to emulator
 ```
 
 ### Link ECU CAN IDs
@@ -218,7 +219,30 @@ LED strip shows multiple overlapping states:
 ## Tools
 
 - `tools/serial_can_emulator.py` - GUI emulator for testing via Serial (no CAN hardware needed)
+- `tools/led_strip_emulator.py` - LED strip visualization emulator (no LED hardware needed)
 - `tools/can_emulator/` - Alternative CAN adapter emulator
+
+## LED Strip Emulator
+
+For testing LED visualization without physical LED strip, enable `ENABLE_LED_STREAM` and use:
+
+```bash
+python tools/led_strip_emulator.py
+```
+
+**Features:**
+- Real-time 60-LED strip visualization with color display
+- Bidirectional serial communication (send CAN, receive LED data)
+- Vehicle simulation sliders: RPM, Throttle, Brake, Coolant, Oil Pressure
+- Preset buttons: Idle, Cruise, Redline, Cold Start, Overheat, Low Oil
+- Communication log with TX/RX color coding
+- ~30 FPS LED updates
+
+**LED Stream Protocol Format:**
+```
+LED:60:FF0000FF000000FF00...
+```
+Format: `LED:count:RRGGBBRRGGBB...` (hex encoded RGB for each LED)
 
 ## Documentation
 
